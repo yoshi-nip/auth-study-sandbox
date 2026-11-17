@@ -261,7 +261,7 @@ func (a *app) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
-	a.respondTokens(w, ctx, u, c.Scope, c.Nonce, c.AuthTime, "")
+	a.respondTokens(w, ctx, u, c.Scope, c.Nonce, c.AuthTime, "", time.Time{})
 }
 
 func (a *app) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
@@ -285,12 +285,13 @@ func (a *app) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
-	a.respondTokens(w, ctx, u, rt.Scope, "", time.Time{}, rt.FamilyID)
+	a.respondTokens(w, ctx, u, rt.Scope, "", time.Time{}, rt.FamilyID, rt.ExpiresAt)
 }
 
 // respondTokens: アクセストークン（API 向け）・ID トークン（BFF 向け）・リフレッシュトークンを返す。
 // family が空なら新しい系統（ログイン）、空でなければ同じ系統で次のリフレッシュトークン（ローテーション）。
-func (a *app) respondTokens(w http.ResponseWriter, ctx context.Context, u *user, scope, nonce string, authTime time.Time, family string) {
+// ローテーションしても系統の期限（familyExpiry）は延ばさない。延ばすと、使い続ける限り永遠に有効になってしまう。
+func (a *app) respondTokens(w http.ResponseWriter, ctx context.Context, u *user, scope, nonce string, authTime time.Time, family string, familyExpiry time.Time) {
 	now := time.Now()
 	access, err := a.signer.sign("at+jwt", jwt.MapClaims{ // RFC 9068: アクセストークンの JWT 形式
 		"iss":                a.cfg.issuer,
@@ -313,9 +314,10 @@ func (a *app) respondTokens(w http.ResponseWriter, ctx context.Context, u *user,
 	refresh := randomToken(32)
 	if family == "" {
 		family = randomToken(12)
+		familyExpiry = now.Add(a.cfg.refreshTokenTTL)
 	}
 	if err := a.store.saveRefresh(ctx, refresh, refreshToken{
-		FamilyID: family, ClientID: a.cfg.clientID, UserID: u.ID, Scope: scope, ExpiresAt: now.Add(a.cfg.refreshTokenTTL),
+		FamilyID: family, ClientID: a.cfg.clientID, UserID: u.ID, Scope: scope, ExpiresAt: familyExpiry,
 	}); err != nil {
 		tokenError(w, http.StatusInternalServerError, "server_error")
 		return

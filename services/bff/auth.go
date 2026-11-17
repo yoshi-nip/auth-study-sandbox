@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -45,14 +46,24 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeReturnTo はログイン後の戻り先を「自サイト内のパス」に限る（オープンリダイレクト対策）。
+//
+// 先頭だけを見るのでは足りない。http.Redirect は相対パスに path.Clean をかけるので、
+// "/./\evil.example" は検査のあとで "/\evil.example" に変わり、ブラウザは "//evil.example"（別サイト）と解釈する。
+// そこで (1) バックスラッシュと制御文字は一切認めない (2) 自分で Clean した結果を検査して、その結果を返す。
 func safeReturnTo(p string) string {
-	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
+	if p == "" || strings.ContainsAny(p, "\\\r\n\t") || strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "/"
 	}
-	if u, err := url.Parse(p); err != nil || u.Host != "" || u.Scheme != "" {
+	u, err := url.Parse(p)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || !strings.HasPrefix(u.Path, "/") || strings.Contains(u.Path, "\\") {
 		return "/"
 	}
-	return p
+	cleaned := path.Clean(u.Path)
+	if strings.HasPrefix(cleaned, "//") || strings.HasPrefix(p, "//") {
+		return "/"
+	}
+	out := &url.URL{Path: cleaned, RawQuery: u.RawQuery}
+	return out.String()
 }
 
 // ---- コールバック: コードをトークンに交換し、セッションを作る ------------------------
@@ -284,9 +295,7 @@ func (a *app) logout(w http.ResponseWriter, r *http.Request) {
 		q := u.Query()
 		q.Set("client_id", a.cfg.clientID)
 		q.Set("post_logout_redirect_uri", a.cfg.postLogoutURL)
-		if a.cfg.logoutIDTokenHint { // Keycloak は id_token_hint があると確認画面を出さない
-			q.Set("id_token_hint", s.IDToken)
-		}
+		// id_token_hint は付けない。付けると ID トークンがブラウザ（URL・履歴）に出て、BFF の前提が崩れる
 		u.RawQuery = q.Encode()
 		logoutURL = u.String()
 	}

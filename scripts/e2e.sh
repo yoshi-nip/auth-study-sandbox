@@ -60,6 +60,12 @@ else
   ok "P0-3 知らない Host 名は TLS の握手で断る"
 fi
 
+# SNI（TLS で名乗ったホスト）と Host ヘッダが食い違うと、nginx は 421 Misdirected Request で断る
+expect_match "P0-3 SNI は正しくても Host が知らない名前なら中身を返さない（421 か切断）" \
+  "$(c -o /dev/null -w '%{http_code}' -H 'Host: unknown.localhost' "$APP/" 2>/dev/null)" '^(421|000)$'
+expect "P0-3 http でも知らない Host には応答しない" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: unknown' "http://127.0.0.1:${HTTP}/" 2>/dev/null)" "000"
+
 published="$(docker compose ps --format json | jq -r 'select((.Publishers // []) | map(select(.PublishedPort > 0)) | length > 0) | .Service' | sort -u | tr '\n' ' ')"
 expect_match "P0-4 ホストにポートを公開しているのは nginx だけ" "$published" '^nginx $'
 
@@ -151,8 +157,17 @@ if [ "$ttl" -gt 0 ] 2>/dev/null; then ok "P1-3 セッションに TTL がある�
 session="$(cj "$A" "$APP/bff/session")"
 expect_match "P2-4 /bff/session でユーザーが分かる" "$session" '"username":"alice"'
 expect_no_match "P2-4 /bff/session にトークンが出ない" "$session" 'eyJ|access_token"|refresh_token'
-expect_no_match "P2-4 Cookie にトークンが出ない" "$(cat "$A")" 'eyJ'
+# アプリ（app.localhost）の Cookie だけを見る。IdP のドメインの Cookie は IdP 自身のもの（Keycloak は JWT を入れる）
+expect_no_match "P2-4 アプリの Cookie にトークンが出ない" "$(grep 'app.localhost' "$A")" 'eyJ'
 expect_no_match "P2-4 コールバックの応答にトークンが出ない" "$(cat "$WORK/cb_headers")" 'eyJ'
+
+# 評価役の指摘（2026-11-18）: path.Clean で "/\evil" に化ける return_to でも、自サイトの外へは戻さない
+evil_jar="$WORK/evil.jar"
+authz="$(cj "$evil_jar" -o /dev/null -w '%{redirect_url}' "$APP/bff/login?return_to=/./%5Cevil.example.com")"
+cj "$evil_jar" -o "$WORK/page.html" "$authz"
+cb="$(submit_login "$evil_jar" alice "$DEMO_PASSWORD")"
+back="$(cj "$evil_jar" -o /dev/null -w '%{redirect_url}' "${cb#* }")"
+expect "P2-2 ログイン後の戻り先は自サイト内だけ（オープンリダイレクトなし）" "$back" "${APP}/"
 
 me="$(cj "$A" "$APP/api/me")"
 expect_match "P2-5 ログイン後の /api/me は API まで届く" "$me" '"username":"alice"'
@@ -234,7 +249,7 @@ before="$(redis_sessions)"
 revoked_before="$(docker compose exec -T auth-db psql -U auth -tAc 'select count(*) from refresh_tokens where revoked' 2>/dev/null | tr -d '\r')"
 logout="$(cj "$A" -X POST -H "Origin: $APP" -H "X-CSRF-Token: $(csrf_of "$A")" "$APP/bff/logout")"
 expect_match "P3-3 ログアウトで IdP のログアウト URL が返る" "$logout" '"logout_url":"https://'
-[ "$IDP" = "own" ] && expect_no_match "P3-3 ログアウト URL にトークンを含めない" "$logout" 'eyJ'
+expect_no_match "P3-3 ログアウト URL にトークンを含めない" "$logout" 'eyJ'
 expect "P3-3 ログアウト後の /api/me は 401" "$(cj "$A" -o /dev/null -w '%{http_code}' "$APP/api/me")" "401"
 after="$(redis_sessions)"
 if [ "$after" -lt "$before" ]; then ok "P3-3 Redis のセッションが消えた（$before → $after）"; else ng "P3-3 Redis のセッションが消えた" "$before → $after"; fi
@@ -243,10 +258,18 @@ if [ "$IDP" = "own" ]; then
   if [ "$revoked_after" -gt "$revoked_before" ]; then ok "P3-3 リフレッシュトークンが失効した"; else ng "P3-3 リフレッシュトークンが失効した" "$revoked_before → $revoked_after"; fi
 fi
 
-# BFF だけログアウトした状態: IdP の SSO セッションは残っているので、フォームなしでログインが終わる
-sso="$(cj "$A" -o /dev/null -w '%{http_code} %{redirect_url}' "$(login_start "$A")")"
-expect_match "P3-4 IdP に SSO セッションがあればフォームを出さない" "$sso" "^302 ${APP}/bff/callback"
-cj "$A" -o /dev/null "${sso#* }"
+# BFF だけログアウトした状態で、もう一度ログインを始める
+if [ "$IDP" = "own" ]; then
+  # 自作 IdP: /revoke はリフレッシュトークンだけを止め、SSO セッションは残す → フォームなしでログインが終わる
+  sso="$(cj "$A" -o /dev/null -w '%{http_code} %{redirect_url}' "$(login_start "$A")")"
+  expect_match "P3-4 IdP に SSO セッションがあればフォームを出さない" "$sso" "^302 ${APP}/bff/callback"
+  cj "$A" -o /dev/null "${sso#* }"
+else
+  # Keycloak: リフレッシュトークンを失効させると、そのユーザーセッション（SSO）も終わる → フォームが出る
+  expect "P3-4 Keycloak は /revoke で SSO セッションも終わる（フォームが出る）" \
+    "$(cj "$A" -o /dev/null -w '%{http_code}' "$(login_start "$A")")" "200"
+  login_as "$A" alice >/dev/null
+fi
 logout_url="$(cj "$A" -X POST -H "Origin: $APP" -H "X-CSRF-Token: $(csrf_of "$A")" "$APP/bff/logout" | jq -r .logout_url)"
 expect_match "P3-4 IdP のログアウトはアプリに戻る" "$(cj "$A" -o /dev/null -w '%{http_code} %{redirect_url}' "$logout_url")" "^302 ${APP}/"
 expect "P3-4 IdP からもログアウトすると、ログイン画面が出る" "$(cj "$A" -o /dev/null -w '%{http_code}' "$(login_start "$A")")" "200"

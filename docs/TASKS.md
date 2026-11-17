@@ -4,11 +4,11 @@
 
 ## 今どこ
 
-- [ ] Phase 0: Nginx（L7）＋静的フロント＋Go API、ネットワーク分割
-- [ ] Phase 1: BFF＋Redis セッション
-- [ ] Phase 2: 自作 OIDC（認可コード＋PKCE）、API は JWKS で検証
-- [ ] Phase 3: リフレッシュ・ログアウト・CSRF・nginx auth_request・レート制限・TLS
-- [ ] Phase 4: Keycloak への差し替え
+- [x] Phase 0: Nginx（L7）＋静的フロント＋Go API、ネットワーク分割
+- [x] Phase 1: BFF＋Redis セッション
+- [x] Phase 2: 自作 OIDC（認可コード＋PKCE）、API は JWKS で検証
+- [x] Phase 3: リフレッシュ・ログアウト・CSRF・nginx auth_request・レート制限・TLS
+- [x] Phase 4: Keycloak への差し替え
 - [ ] Phase 5: L4 プロキシ・BFF のスケールアウト・README
 
 ## 受け入れ基準
@@ -61,4 +61,15 @@
 
 ## 評価役の記録
 
-（認証まわりを変えたら、日付・渡した仕様・結果を書く）
+### 2026-11-18 Phase 1〜3（渡した仕様: 受け入れ基準 P0〜P3・BFF パターンの不変条件・OIDC の要件・ポート公開）
+
+| 指摘 | 重大度 | 対応 |
+|---|---|---|
+| BFF の `return_to` にオープンリダイレクト（`/./\evil` が `http.Redirect` の path.Clean で `/\evil` に化ける） | 中 | 修正。バックスラッシュ・制御文字を拒否し、Clean 後の値で検査して返す。単体テストと E2E（P2-2）を追加 |
+| Keycloak 構成で `id_token_hint` によりログアウト URL に ID トークンが載る | 中 | 修正。`id_token_hint` を使うオプションを削除。Keycloak は `/revoke` で SSO セッションも終わるため不要だった。E2E（P3-3）を両 IdP で実行 |
+| IdP の `GET /logout` は呼び出し元を確かめない（他サイトから IdP をログアウトさせられる） | 低 | 残す。理由は docs/03 の「省いたもの」 |
+| SNI は正しいが Host が知らない名前の場合を検査していない | 低 | 確認・追加。nginx は 421 で断っていた。:80 の知らない Host は 444 にした。E2E（P0-3）を追加 |
+| リフレッシュトークンの期限がローテーションのたびに延びる | 低 | 修正。系統の期限を最初のログインから延ばさない |
+| 再利用された認可コードから発行済みのトークンを失効させない | 低 | 残す（RFC 6749 では SHOULD）。docs/03 に記載 |
+
+自己レビューでは見つけられなかった種類（ライブラリの内部処理で値が化ける）だった。

@@ -16,6 +16,11 @@ func TestSafeReturnTo(t *testing.T) {
 		"https://evil.example.com": "/",
 		"javascript:alert(1)":      "/",
 		"notes":                    "/",
+		// 評価役の指摘（2026-11-18）: http.Redirect の path.Clean を通ると "/\\evil" に変わる形
+		"/./\\evil.example.com":    "/",
+		"/a/../\\evil.example.com": "/",
+		"/.//evil.example.com":     "/evil.example.com",
+		"/%5Cevil.example.com":     "/", // デコード後にバックスラッシュになるものも認めない
 	} {
 		if got := safeReturnTo(in); got != want {
 			t.Errorf("%q → %q, want %q", in, got, want)

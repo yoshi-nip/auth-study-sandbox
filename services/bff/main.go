@@ -25,14 +25,13 @@ import (
 const addr = ":8080"
 
 type config struct {
-	appOrigin         string // ブラウザから見たこのアプリのオリジン（CSRF の Origin 検査に使う）
-	clientID          string
-	clientSecret      string
-	postLogoutURL     string
-	revocationURL     string
-	endSessionURL     string
-	logoutIDTokenHint bool
-	refreshSkew       time.Duration
+	appOrigin     string // ブラウザから見たこのアプリのオリジン（CSRF の Origin 検査に使う）
+	clientID      string
+	clientSecret  string
+	postLogoutURL string
+	revocationURL string
+	endSessionURL string
+	refreshSkew   time.Duration
 }
 
 type app struct {
@@ -50,14 +49,13 @@ func main() {
 
 	appOrigin := strings.TrimRight(mustEnv("APP_ORIGIN"), "/")
 	cfg := config{
-		appOrigin:         appOrigin,
-		clientID:          mustEnv("OIDC_CLIENT_ID"),
-		clientSecret:      mustEnv("OIDC_CLIENT_SECRET"),
-		postLogoutURL:     appOrigin + "/",
-		revocationURL:     env("OIDC_REVOCATION_URL", ""),
-		endSessionURL:     env("OIDC_END_SESSION_URL", ""),
-		logoutIDTokenHint: env("OIDC_LOGOUT_ID_TOKEN_HINT", "false") == "true",
-		refreshSkew:       mustDuration("REFRESH_SKEW", "30s"),
+		appOrigin:     appOrigin,
+		clientID:      mustEnv("OIDC_CLIENT_ID"),
+		clientSecret:  mustEnv("OIDC_CLIENT_SECRET"),
+		postLogoutURL: appOrigin + "/",
+		revocationURL: env("OIDC_REVOCATION_URL", ""),
+		endSessionURL: env("OIDC_END_SESSION_URL", ""),
+		refreshSkew:   mustDuration("REFRESH_SKEW", "30s"),
 	}
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}

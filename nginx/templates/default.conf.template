@@ -17,20 +17,28 @@ upstream auth {
 limit_req_zone $binary_remote_addr zone=login:10m rate=20r/m;
 limit_req_status 429;
 
-# --- :80  HTTP は HTTPS へ転送するだけ ---------------------------------------
+# --- :80  知っているホストだけ HTTPS へ転送。知らない Host には応答せず切る（444 = nginx 独自の「無言で切断」）
 server {
     listen 80 default_server;
     server_name _;
+    return 444;
+}
+server {
+    listen 80;
+    server_name app.localhost auth.localhost kc.localhost;
     location / {
         return 301 https://$host:${HTTPS_PORT}$request_uri;
     }
 }
 
-# --- :443 知らないホスト名（SNI）は TLS の握手の時点で断る -------------------
+# --- :443 知らないホスト名は断る ---------------------------------------------
+#   SNI が知らない名前 → TLS の握手の時点で断る（ssl_reject_handshake）
+#   SNI は正しいが Host ヘッダが知らない名前 → ここに振り分けられるので、応答せず切る（444）
 server {
     listen 443 ssl default_server;
     server_name _;
     ssl_reject_handshake on;
+    return 444;
 }
 
 # --- app.localhost: フロント（静的）・BFF・API -------------------------------
