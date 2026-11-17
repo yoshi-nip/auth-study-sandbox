@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(make *)",
+      "Bash(go build*)",
+      "Bash(go test*)",
+      "Bash(go vet*)",
+      "Bash(go mod *)",
+      "Bash(go work *)",
+      "Bash(go get *)",
+      "Bash(go run *)",
+      "Bash(gofmt *)",
+      "Bash(docker compose *)",
+      "Bash(docker pull *)",
+      "Bash(docker run --rm *)",
+      "Bash(docker ps*)",
+      "Bash(docker logs *)",
+      "Bash(docker inspect *)",
+      "Bash(docker network ls*)",
+      "Bash(docker network inspect *)",
+      "Bash(docker image ls*)",
+      "Bash(curl *)",
+      "Bash(jq *)",
+      "Bash(openssl *)",
+      "Bash(./scripts/*)",
+      "Bash(bash scripts/*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)",
+      "Bash(git switch *)",
+      "Bash(git branch*)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-files*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./nginx/certs/**)",
+      "Bash(cat .env*)",
+      "Bash(* .env)",
+      "Bash(git commit *--no-verify*)",
+      "Bash(git commit -n *)",
+      "Bash(git push *--no-verify*)",
+      "Bash(git config *hooksPath*)",
+      "Bash(git -c core.hooksPath*)",
+      "Bash(git -c core.hookspath*)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/)",
+      "Bash(rm -rf $HOME*)",
+      "Bash(rm -rf .)",
+      "Bash(rm -rf ..)",
+      "Bash(rm -rf .git*)",
+      "Bash(gh repo delete*)",
+      "Bash(gh secret *)"
+    ],
+    "ask": [
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git branch -D *)",
+      "Bash(gh repo create*)",
+      "Bash(gh api * -X *)",
+      "Bash(gh api * --method *)",
+      "Bash(rm -rf *)",
+      "Bash(docker push*)",
+      "Bash(docker system prune*)",
+      "Bash(docker volume rm*)",
+      "Bash(docker volume prune*)",
+      "Bash(aws *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/gofmt-on-edit.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

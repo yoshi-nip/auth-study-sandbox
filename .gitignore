@@ -1,0 +1,9 @@
+.env
+.env.local
+nginx/certs/
+*.pem
+*.key
+/tmp/
+.e2e/
+.claude/settings.local.json
+.DS_Store
