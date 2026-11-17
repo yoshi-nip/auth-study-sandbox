@@ -45,7 +45,7 @@ check-sensitive:
 	@./scripts/check-sensitive.sh --all
 
 compose-check:
-	@$(COMPOSE) config --quiet && $(KC) config --quiet && echo "[compose] OK"
+	@$(COMPOSE) config --quiet && { [ ! -f compose.keycloak.yaml ] || $(KC) config --quiet; } && echo "[compose] OK"
 
 lint: fmt-check vet check-sensitive compose-check
 

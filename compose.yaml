@@ -1,0 +1,75 @@
+# auth-sandbox: nginx(L7) → BFF → API と、認証基盤・セッションストアを Docker ネットワークで分けて組む。
+#
+# ネットワーク（≒ AWS のサブネット＋セキュリティグループ）
+#   edge      : 外に出られる唯一のネットワーク。nginx だけが参加し、ホストにポートを公開する
+#   app       : nginx → BFF / 認証基盤                         internal（外部へ出られない）
+#   backend   : BFF → API、API → 認証基盤（JWKS の取得）         internal
+#   bff-data  : BFF → Redis（セッション）                       internal
+#   auth-data : 認証基盤 → PostgreSQL（ユーザー・トークン）       internal
+#
+# 「誰が誰に届くか」は、同じネットワークに入っているかだけで決まる。
+name: auth-sandbox
+
+x-go-service: &go-service
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  healthcheck:
+    test: ["CMD", "/app", "healthcheck"]
+    interval: 3s
+    timeout: 2s
+    retries: 20
+    start_period: 2s
+
+services:
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    environment:
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./nginx/stream.d:/etc/nginx/stream.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    networks: [edge, app]
+    depends_on:
+      bff: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "--resolve", "app.localhost:443:127.0.0.1", "https://app.localhost/nginx-health"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  bff:
+    <<: *go-service
+    build: ./services/bff
+    environment:
+      SERVICE_NAME: bff
+      API_URL: http://api:8080
+    networks: [app, backend]
+    depends_on:
+      api: { condition: service_healthy }
+
+  api:
+    <<: *go-service
+    build: ./services/api
+    environment:
+      SERVICE_NAME: api
+    networks: [backend]
+
+networks:
+  edge:
+    name: auth-sandbox_edge
+  app:
+    name: auth-sandbox_app
+    internal: true
+  backend:
+    name: auth-sandbox_backend
+    internal: true

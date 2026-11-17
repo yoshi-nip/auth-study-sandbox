@@ -1,0 +1,58 @@
+# このファイルはテンプレート。nginx イメージの起動時に envsubst で ${HTTPS_PORT} などが埋められ、
+# /etc/nginx/conf.d/default.conf になる（nginx 自身の $host などの変数は置き換えられない）。
+
+# --- upstream（振り分け先） -------------------------------------------------
+# `resolve` で Docker の DNS を引き直し続ける。BFF を --scale で増やすと、自動で振り分け先が増える
+upstream bff {
+    zone bff 64k;
+    server bff:8080 resolve;
+    keepalive 16;
+}
+
+# --- :80  HTTP は HTTPS へ転送するだけ ---------------------------------------
+server {
+    listen 80 default_server;
+    server_name _;
+    location / {
+        return 301 https://$host:${HTTPS_PORT}$request_uri;
+    }
+}
+
+# --- :443 知らないホスト名（SNI）は TLS の握手の時点で断る -------------------
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+# --- app.localhost: フロント（静的）・BFF・API -------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name app.localhost;
+    include /etc/nginx/snippets/security-headers.conf;
+
+    location = /nginx-health {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # SPA の静的ファイル。nginx 自身が返す（BFF を通らない）
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # BFF 自身のエンドポイント（ログイン・コールバック・セッション）
+    location /bff/ {
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://bff;
+    }
+
+    # API は必ず BFF を経由させる（nginx から API へは、ネットワーク的に届かない）
+    location /api/ {
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://bff;
+    }
+}
