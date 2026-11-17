@@ -1,0 +1,85 @@
+{
+  "realm": "sandbox",
+  "enabled": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "bruteForceProtected": true,
+  "roles": {
+    "realm": [
+      { "name": "editor", "description": "メモを書き込める" },
+      { "name": "viewer", "description": "読むだけ" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "sandbox-bff",
+      "name": "auth-sandbox BFF",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${BFF_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["${APP_ORIGIN}/bff/callback"],
+      "webOrigins": ["${APP_ORIGIN}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${APP_ORIGIN}/"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "sandbox-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "roles-top-level",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Sandbox",
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "${DEMO_PASSWORD}", "temporary": false }],
+      "realmRoles": ["editor", "viewer"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Sandbox",
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "${DEMO_PASSWORD}", "temporary": false }],
+      "realmRoles": ["viewer"]
+    }
+  ]
+}

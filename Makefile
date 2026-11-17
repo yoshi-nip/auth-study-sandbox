@@ -67,5 +67,5 @@ up-keycloak: ## 認証基盤を Keycloak に差し替えて起動
 down-keycloak:
 	$(KC) down --remove-orphans
 
-e2e-keycloak: ## Keycloak 構成での E2E（ログイン〜API〜ログアウト）
+e2e-keycloak: up-keycloak ## Keycloak に差し替えて E2E（ログイン〜API〜ログアウト）
 	@IDP=keycloak ./scripts/e2e.sh

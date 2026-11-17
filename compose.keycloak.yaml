@@ -1,0 +1,50 @@
+# 認証基盤を Keycloak に差し替える上書きファイル（Phase 4）。
+#   docker compose -f compose.yaml -f compose.keycloak.yaml up -d   （= make up-keycloak）
+#
+# BFF と API のコードは一行も変えず、環境変数（エンドポイントの URL）だけを差し替える。
+# どちらも標準の OIDC / JWT / JWKS だけに依存しているので、IdP が自作か Keycloak かを知らない。
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${DEMO_PASSWORD}
+      # ブラウザから見える URL。トークンの iss もこれになる
+      KC_HOSTNAME: https://kc.localhost:${HTTPS_PORT:-8443}
+      # BFF・API がコンテナ間の URL（http://keycloak:8080）で呼んでも、その URL で応答させる
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      # realm-sandbox.json の ${...} に埋め込む値
+      APP_ORIGIN: https://app.localhost:${HTTPS_PORT:-8443}
+      BFF_CLIENT_SECRET: ${BFF_CLIENT_SECRET}
+      DEMO_PASSWORD: ${DEMO_PASSWORD}
+    volumes:
+      - ./keycloak/realm-sandbox.json:/opt/keycloak/data/import/realm-sandbox.json:ro
+    networks: [app, backend]
+    healthcheck:
+      # イメージに curl が無いので bash の /dev/tcp で管理ポートの /health/ready を見る
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
+
+  bff:
+    environment:
+      OIDC_ISSUER: https://kc.localhost:${HTTPS_PORT:-8443}/realms/sandbox
+      OIDC_AUTHORIZE_URL: https://kc.localhost:${HTTPS_PORT:-8443}/realms/sandbox/protocol/openid-connect/auth
+      OIDC_END_SESSION_URL: https://kc.localhost:${HTTPS_PORT:-8443}/realms/sandbox/protocol/openid-connect/logout
+      OIDC_TOKEN_URL: http://keycloak:8080/realms/sandbox/protocol/openid-connect/token
+      OIDC_JWKS_URL: http://keycloak:8080/realms/sandbox/protocol/openid-connect/certs
+      OIDC_REVOCATION_URL: http://keycloak:8080/realms/sandbox/protocol/openid-connect/revoke
+    depends_on:
+      keycloak: { condition: service_healthy }
+
+  api:
+    environment:
+      OIDC_ISSUER: https://kc.localhost:${HTTPS_PORT:-8443}/realms/sandbox
+      OIDC_JWKS_URL: http://keycloak:8080/realms/sandbox/protocol/openid-connect/certs
