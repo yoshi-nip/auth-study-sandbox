@@ -278,6 +278,38 @@ expect_match "P3-5 nginx で止まると rejected_by=nginx" "$(c "$APP/api/notes
 expect_match "P3-5 BFF で止まると rejected_by=bff" "$(post_note "$B" "x")$(cat "$WORK/post.json")" '"rejected_by":"bff"'
 expect_match "P3-5 API で止まると rejected_by=api" "$(post_note "$B" "x" "$(csrf_of "$B")")$(cat "$WORK/post.json")" '"rejected_by":"api"'
 
+########################################################################
+section "Phase 5 — L4 プロキシと BFF のスケールアウト"
+
+L4="http://127.0.0.1:${L4_PORT:-9000}"
+whoami="$(curl -s --max-time 5 "$L4/bff/whoami")"
+expect_match "P5-1 L4 ポートは TCP をそのまま BFF に流す" "$whoami" '"served_by"'
+expect_match "P5-1 L4 では X-Forwarded-For が付かない（HTTP を見ていない）" "$whoami" '"x_forwarded_for":""'
+expect "P5-1 L4 はパスで振り分けない（/ も BFF に行き、静的ファイルは返らない）" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$L4/")" "404"
+expect_match "P5-1 L4 では nginx の auth_request が効かないが、BFF の層で止まる" \
+  "$(curl -s --max-time 5 "$L4/api/me")" '"rejected_by":"bff"'
+
+if [ "$IDP" = "own" ]; then
+  docker compose up -d --no-recreate --scale bff=3 --wait >/dev/null 2>&1
+  sleep 6   # nginx の resolver（valid=5s）が新しい BFF の IP を引き直すのを待つ
+  S="$WORK/scale.jar"
+  login_as "$S" alice >/dev/null
+  seen=""; codes=""
+  for _ in $(seq 1 15); do
+    res="$(cj "$S" -w '\n%{http_code}' "$APP/bff/session")"
+    codes="$codes $(echo "$res" | tail -1)"
+    seen="$seen $(echo "$res" | head -1 | jq -r .served_by)"
+  done
+  n="$(echo "$seen" | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l | tr -d ' ')"
+  if [ "$n" -ge 2 ]; then ok "P5-2 BFF 3台に振り分けられる（応答した台: $n）"; else ng "P5-2 BFF 3台に振り分けられる" "応答した台: $n"; fi
+  expect_no_match "P5-2 どの台に当たっても同じセッションで 200（Redis で共有）" "$codes" '[^ ]*[^2 ][0-9][0-9]'
+  api_codes="$(for _ in $(seq 1 6); do cj "$S" -o /dev/null -w '%{http_code} ' "$APP/api/me"; done)"
+  expect_match "P5-2 どの台からでも API を呼べる" "$api_codes" '^(200 ){6}$'
+  docker compose up -d --no-recreate --scale bff=1 --wait >/dev/null 2>&1
+  sleep 6
+fi
+
 # レート制限は最後に（他のログインを巻き込まないように）
 if [ "$IDP" = "own" ]; then
   codes="$(for _ in $(seq 1 35); do c -o /dev/null -w '%{http_code}\n' -X POST -d 'username=x&password=y' "$AUTH/login?client_id=x"; done | sort | uniq -c | tr '\n' ' ')"

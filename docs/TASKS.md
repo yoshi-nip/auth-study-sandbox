@@ -9,7 +9,7 @@
 - [x] Phase 2: 自作 OIDC（認可コード＋PKCE）、API は JWKS で検証
 - [x] Phase 3: リフレッシュ・ログアウト・CSRF・nginx auth_request・レート制限・TLS
 - [x] Phase 4: Keycloak への差し替え
-- [ ] Phase 5: L4 プロキシ・BFF のスケールアウト・README
+- [x] Phase 5: L4 プロキシ・BFF のスケールアウト・README
 
 ## 受け入れ基準
 

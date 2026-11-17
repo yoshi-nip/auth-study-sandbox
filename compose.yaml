@@ -29,6 +29,7 @@ services:
     ports:
       - "${HTTP_PORT:-8080}:80"
       - "${HTTPS_PORT:-8443}:443"
+      - "127.0.0.1:${L4_PORT:-9000}:9000"   # L4（TCP）プロキシの練習用。ローカルホストからだけ
     environment:
       HTTPS_PORT: ${HTTPS_PORT:-8443}
       NGINX_AUTH_REQUEST: ${NGINX_AUTH_REQUEST:-/_auth}

@@ -1,0 +1,27 @@
+# make verify（静的検査・単体テスト・起動して E2E）を CI でも回す（docs/harness.md H6）。
+# git フックを入れていない clone からの変更に対する、最後の砦。
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: setup (.env・証明書)
+        run: make setup
+      - name: verify
+        run: make verify
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
