@@ -76,6 +76,192 @@ for net in app backend bff-data auth-data; do
 done
 
 ########################################################################
+# ログインを外から操作するための道具
+IDP="${IDP:-own}"   # own = 自作 OIDC / keycloak = Keycloak（make e2e-keycloak）
+if [ "$IDP" = "keycloak" ]; then AUTH="https://kc.localhost:${PORT}"; else AUTH="https://auth.localhost:${PORT}"; fi
+cj() { local j="$1"; shift; c -b "$j" -c "$j" "$@"; }          # Cookie を jar に保存する curl（≒ 1つのブラウザ）
+login_start() { cj "$1" -o /dev/null -w '%{redirect_url}' "$APP/bff/login"; }
+# submit_login <jar> <user> <password> : 直前に取得したログイン画面（$WORK/page.html）のフォームを送る
+submit_login() {
+  local action csrf
+  action="$(grep -oE '<form[^>]*action="[^"]*"' "$WORK/page.html" | head -1 | sed -E 's/.*action="([^"]*)"/\1/; s/&amp;/\&/g; s/&#43;/+/g')"   # HTML の文字参照を戻す
+  case "$action" in http*) ;; *) action="${AUTH}${action}" ;; esac
+  csrf="$(sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' "$WORK/page.html")"
+  cj "$1" -o "$WORK/login_res.html" -w '%{http_code} %{redirect_url}' -X POST \
+    ${csrf:+--data-urlencode "csrf=$csrf"} --data-urlencode "username=$2" --data-urlencode "password=$3" "$action"
+}
+# login_as <jar> <user> : ログイン開始 → フォーム → コールバックまで。コールバックのヘッダを $WORK/cb_headers に残す
+login_as() {
+  local authz cb
+  authz="$(login_start "$1")"
+  cj "$1" -o "$WORK/page.html" "$authz"
+  cb="$(submit_login "$1" "$2" "$DEMO_PASSWORD")"
+  cj "$1" -D "$WORK/cb_headers" -o /dev/null -w '%{http_code}' "${cb#* }"
+}
+sid_of() { awk '$6 == "__Host-sid" { print $7 }' "$1" | tail -1; }
+csrf_of() { cj "$1" "$APP/bff/session" | jq -r '.csrf_token // empty'; }
+post_note() { # post_note <jar> <text> [csrf] [origin]
+  cj "$1" -o "$WORK/post.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -H "Origin: ${4:-$APP}" ${3:+-H "X-CSRF-Token: $3"} -d "{\"text\":\"$2\"}" "$APP/api/notes"
+}
+redis_sessions() { docker compose exec -T redis redis-cli --scan --pattern 'sess:*' | grep -vc refresh-lock; }
+
+########################################################################
+section "Phase 1・2 — BFF のセッションと自作 OIDC（IdP=$IDP）"
+
+body="$(c "$APP/api/me")"
+expect_match "P1-1 未ログインの /api/me は 401（nginx が止める）" "$body" '"rejected_by":"nginx"'
+
+A="$WORK/alice.jar"; B="$WORK/bob.jar"; X="$WORK/x.jar"
+authz="$(login_start "$A")"
+expect_match "P2-1 認可エンドポイントへ転送" "$authz" "^${AUTH}/"
+expect_match "P2-1 PKCE は S256" "$authz" 'code_challenge_method=S256'
+expect_match "P2-1 code_challenge・state・nonce 付き" "$authz" 'code_challenge=[^&]+.*'
+expect_match "P2-1 state 付き" "$authz" '[?&]state=[A-Za-z0-9_-]{20,}'
+expect_match "P2-1 nonce 付き" "$authz" '[?&]nonce=[A-Za-z0-9_-]{20,}'
+
+cj "$A" -o "$WORK/page.html" "$authz"
+res="$(submit_login "$A" alice 'wrong-password')"
+expect_match "P2-2 誤ったパスワードではコードが発行されない" "$res" '^(200|401) $'
+
+if [ "$IDP" = "own" ]; then
+  evil="$(c -o /dev/null -w '%{http_code} %{redirect_url}' "$AUTH/authorize?client_id=sandbox-bff&redirect_uri=https%3A%2F%2Fevil.example.com%2Fcb&response_type=code&scope=openid&state=x&code_challenge=abc&code_challenge_method=S256")"
+  expect "P2-2 未登録の redirect_uri には転送しない" "$evil" "400 "
+fi
+
+login_start "$X" >/dev/null
+expect "P2-3 state が合わないコールバックは 400" \
+  "$(cj "$X" -o /dev/null -w '%{http_code}' "$APP/bff/callback?code=x&state=forged")" "400"
+
+expect "P1-2 ログインできる（コールバックから / へ 302）" "$(login_as "$A" alice)" "302"
+setcookie="$(grep -i '^set-cookie: __Host-sid=' "$WORK/cb_headers" | tr -d '\r')"
+expect_match "P1-2 __Host-sid が付く" "$setcookie" '__Host-sid=[A-Za-z0-9_-]{40,}'
+expect_match "P1-2 HttpOnly" "$setcookie" '; HttpOnly'
+expect_match "P1-2 Secure" "$setcookie" '; Secure'
+expect_match "P1-2 SameSite=Lax" "$setcookie" '; SameSite=Lax'
+expect_match "P1-2 Path=/" "$setcookie" '; Path=/'
+
+sid_a="$(sid_of "$A")"
+keys="$(docker compose exec -T redis redis-cli --scan --pattern 'sess:*')"
+expect_match "P1-3 セッションは Redis にある" "$keys" '^sess:[0-9a-f]{64}'
+expect_no_match "P1-3 Redis のキーはセッション ID そのものではない（ハッシュ）" "$keys" "$sid_a"
+ttl="$(docker compose exec -T redis redis-cli ttl "$(echo "$keys" | head -1)" | tr -d '\r')"
+if [ "$ttl" -gt 0 ] 2>/dev/null; then ok "P1-3 セッションに TTL がある（${ttl}s）"; else ng "P1-3 セッションに TTL がある" "ttl=$ttl"; fi
+
+session="$(cj "$A" "$APP/bff/session")"
+expect_match "P2-4 /bff/session でユーザーが分かる" "$session" '"username":"alice"'
+expect_no_match "P2-4 /bff/session にトークンが出ない" "$session" 'eyJ|access_token"|refresh_token'
+expect_no_match "P2-4 Cookie にトークンが出ない" "$(cat "$A")" 'eyJ'
+expect_no_match "P2-4 コールバックの応答にトークンが出ない" "$(cat "$WORK/cb_headers")" 'eyJ'
+
+me="$(cj "$A" "$APP/api/me")"
+expect_match "P2-5 ログイン後の /api/me は API まで届く" "$me" '"username":"alice"'
+
+# 固定攻撃の対策: もう一度ログインすると（SSO で即通る）、新しい ID に変わり、古い ID は使えない
+login_start "$A" >/dev/null
+cj "$A" -o /dev/null "$(cj "$A" -o /dev/null -w '%{redirect_url}' "$(login_start "$A")")"
+sid_a2="$(sid_of "$A")"
+if [ -n "$sid_a2" ] && [ "$sid_a2" != "$sid_a" ]; then ok "P1-4 再ログインでセッション ID が変わる"; else ng "P1-4 再ログインでセッション ID が変わる"; fi
+expect "P1-4 古いセッション ID は使えない" \
+  "$(c -o /dev/null -w '%{http_code}' -H "Cookie: __Host-sid=$sid_a" "$APP/bff/session")" "401"
+
+# API を直接たたく（backend ネットワークの使い捨てコンテナから。≒ 内部に入り込まれた状況）
+api_with() { probe auth-sandbox_backend -H "Authorization: Bearer $1" http://api:8080/api/me; }
+expect "P2-5 トークンなしは API が 401" "$(probe auth-sandbox_backend http://api:8080/api/me)" "401"
+expect "P2-5 でたらめなトークンは 401" "$(api_with 'not-a-jwt')" "401"
+none_jwt="$(printf '{"alg":"none","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=').$(printf '{"sub":"x","aud":"sandbox-api","exp":9999999999}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')."
+expect "P2-5 alg=none の偽造トークンは 401" "$(api_with "$none_jwt")" "401"
+
+if [ "$IDP" = "own" ]; then
+  # e2e 自身がクライアント（BFF と同じ client_id/secret）になり、トークンを直接もらって境界を確かめる
+  verifier="$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' | cut -c1-64)"
+  challenge="$(printf '%s' "$verifier" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  T="$WORK/direct.jar"
+  cj "$T" -o "$WORK/page.html" "$AUTH/authorize?client_id=sandbox-bff&redirect_uri=$(jq -rn --arg u "$APP/bff/callback" '$u|@uri')&response_type=code&scope=openid%20profile&state=e2e-state&nonce=e2e-nonce&code_challenge=$challenge&code_challenge_method=S256"
+  code="$(submit_login "$T" alice "$DEMO_PASSWORD" | sed -nE 's/.*[?&]code=([^&]+).*/\1/p')"
+  tok() { c -u "sandbox-bff:${BFF_CLIENT_SECRET}" "$AUTH/token" "$@"; }
+  bad_pkce="$(tok -d grant_type=authorization_code -d "code=$code" -d "redirect_uri=$APP/bff/callback" -d "code_verifier=$(openssl rand -hex 32)")"
+  expect_match "P2-7 code_verifier が違うと交換できない（PKCE）" "$bad_pkce" '"error":"invalid_grant"'
+  # PKCE で失敗したコードも使用済みになる。新しいコードを取り直す
+  cj "$T" -o "$WORK/page.html" -w '' "$AUTH/authorize?client_id=sandbox-bff&redirect_uri=$(jq -rn --arg u "$APP/bff/callback" '$u|@uri')&response_type=code&scope=openid%20profile&state=e2e-state&nonce=e2e-nonce&code_challenge=$challenge&code_challenge_method=S256" -D "$WORK/sso_headers"
+  code="$(grep -i '^location:' "$WORK/sso_headers" | sed -nE 's/.*[?&]code=([^&]+).*/\1/p' | tr -d '\r')"
+  tokens="$(tok -d grant_type=authorization_code -d "code=$code" -d "redirect_uri=$APP/bff/callback" -d "code_verifier=$verifier")"
+  access="$(echo "$tokens" | jq -r .access_token)"; idtok="$(echo "$tokens" | jq -r .id_token)"; refresh="$(echo "$tokens" | jq -r .refresh_token)"
+  expect "P2-7 認可コードは2回目の交換で失敗する" \
+    "$(tok -d grant_type=authorization_code -d "code=$code" -d "redirect_uri=$APP/bff/callback" -d "code_verifier=$verifier" | jq -r .error)" "invalid_grant"
+  expect "P2-5 正しいアクセストークンなら API は 200" "$(api_with "$access")" "200"
+  expect "P2-5 ID トークン（aud が BFF）では API は 401" "$(api_with "$idtok")" "401"
+  tampered="${access%.*}.$(printf 'x%.0s' {1..86})"
+  expect "P2-5 署名を改ざんしたトークンは 401" "$(api_with "$tampered")" "401"
+  r1="$(tok -d grant_type=refresh_token -d "refresh_token=$refresh" | jq -r .refresh_token)"
+  expect "P3-1 リフレッシュトークンを2回使うと拒否（再利用検知）" \
+    "$(tok -d grant_type=refresh_token -d "refresh_token=$refresh" | jq -r .error)" "invalid_grant"
+  expect "P3-1 再利用を検知したら、同じ系統の新しいトークンも失効" \
+    "$(tok -d grant_type=refresh_token -d "refresh_token=$r1" | jq -r .error)" "invalid_grant"
+fi
+
+expect "P2-6 bob（viewer）でもログインできる" "$(login_as "$B" bob)" "302"
+expect "P2-6 bob は書き込み 403（API のロール認可）" "$(post_note "$B" "by bob" "$(csrf_of "$B")")" "403"
+expect_match "P2-6 403 を返したのは API" "$(cat "$WORK/post.json")" '"rejected_by":"api"'
+expect "P2-6 alice（editor）は書き込み 201" "$(post_note "$A" "by alice" "$(csrf_of "$A")")" "201"
+
+########################################################################
+section "Phase 3 — リフレッシュ・CSRF・ログアウト・SSO・層ごとの拒否"
+
+csrf_a="$(csrf_of "$A")"
+expect "P3-2 CSRF トークンなしの POST は 403" "$(post_note "$A" "no csrf")" "403"
+expect_match "P3-2 403 を返したのは BFF" "$(cat "$WORK/post.json")" '"rejected_by":"bff"'
+expect "P3-2 Origin が別サイトなら 403" "$(post_note "$A" "evil" "$csrf_a" "https://evil.example.com")" "403"
+expect "P3-2 正しいトークンと Origin なら 201" "$(post_note "$A" "ok" "$csrf_a")" "201"
+
+# auth は distroless（シェルなし）なので、コンテナの設定は docker inspect で読む
+ttl_cfg="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose ps -q auth)" 2>/dev/null | sed -n 's/^ACCESS_TOKEN_TTL=//p')"
+if [ "$IDP" = "own" ] && [ "$ttl_cfg" = "15s" ]; then
+  exp1="$(cj "$A" "$APP/bff/session" | jq -r .access_token_expires_at)"
+  sleep 11   # 期限 15 秒・5 秒前にリフレッシュ → 10 秒を過ぎた後の API 呼び出しでリフレッシュされる
+  expect "P3-1 期限間近でも API 呼び出しは成功する" "$(cj "$A" -o /dev/null -w '%{http_code}' "$APP/api/me")" "200"
+  exp2="$(cj "$A" "$APP/bff/session" | jq -r .access_token_expires_at)"
+  if [[ "$exp2" > "$exp1" ]]; then ok "P3-1 BFF がアクセストークンをリフレッシュした（$exp1 → $exp2）"; else ng "P3-1 BFF がリフレッシュした" "$exp1 → $exp2"; fi
+else
+  if [ "${E2E_REQUIRE_REFRESH:-0}" = "1" ]; then
+    ng "P3-1 BFF のリフレッシュ" "ACCESS_TOKEN_TTL=15s で起動していない（make e2e-up で起動する）"
+  else
+    echo "  - P3-1 BFF のリフレッシュは ACCESS_TOKEN_TTL=15s で起動したときだけ確かめる（make e2e-up）"
+  fi
+fi
+
+before="$(redis_sessions)"
+revoked_before="$(docker compose exec -T auth-db psql -U auth -tAc 'select count(*) from refresh_tokens where revoked' 2>/dev/null | tr -d '\r')"
+logout="$(cj "$A" -X POST -H "Origin: $APP" -H "X-CSRF-Token: $(csrf_of "$A")" "$APP/bff/logout")"
+expect_match "P3-3 ログアウトで IdP のログアウト URL が返る" "$logout" '"logout_url":"https://'
+[ "$IDP" = "own" ] && expect_no_match "P3-3 ログアウト URL にトークンを含めない" "$logout" 'eyJ'
+expect "P3-3 ログアウト後の /api/me は 401" "$(cj "$A" -o /dev/null -w '%{http_code}' "$APP/api/me")" "401"
+after="$(redis_sessions)"
+if [ "$after" -lt "$before" ]; then ok "P3-3 Redis のセッションが消えた（$before → $after）"; else ng "P3-3 Redis のセッションが消えた" "$before → $after"; fi
+if [ "$IDP" = "own" ]; then
+  revoked_after="$(docker compose exec -T auth-db psql -U auth -tAc 'select count(*) from refresh_tokens where revoked' | tr -d '\r')"
+  if [ "$revoked_after" -gt "$revoked_before" ]; then ok "P3-3 リフレッシュトークンが失効した"; else ng "P3-3 リフレッシュトークンが失効した" "$revoked_before → $revoked_after"; fi
+fi
+
+# BFF だけログアウトした状態: IdP の SSO セッションは残っているので、フォームなしでログインが終わる
+sso="$(cj "$A" -o /dev/null -w '%{http_code} %{redirect_url}' "$(login_start "$A")")"
+expect_match "P3-4 IdP に SSO セッションがあればフォームを出さない" "$sso" "^302 ${APP}/bff/callback"
+cj "$A" -o /dev/null "${sso#* }"
+logout_url="$(cj "$A" -X POST -H "Origin: $APP" -H "X-CSRF-Token: $(csrf_of "$A")" "$APP/bff/logout" | jq -r .logout_url)"
+expect_match "P3-4 IdP のログアウトはアプリに戻る" "$(cj "$A" -o /dev/null -w '%{http_code} %{redirect_url}' "$logout_url")" "^302 ${APP}/"
+expect "P3-4 IdP からもログアウトすると、ログイン画面が出る" "$(cj "$A" -o /dev/null -w '%{http_code}' "$(login_start "$A")")" "200"
+
+expect_match "P3-5 nginx で止まると rejected_by=nginx" "$(c "$APP/api/notes")" '"rejected_by":"nginx"'
+expect_match "P3-5 BFF で止まると rejected_by=bff" "$(post_note "$B" "x")$(cat "$WORK/post.json")" '"rejected_by":"bff"'
+expect_match "P3-5 API で止まると rejected_by=api" "$(post_note "$B" "x" "$(csrf_of "$B")")$(cat "$WORK/post.json")" '"rejected_by":"api"'
+
+# レート制限は最後に（他のログインを巻き込まないように）
+if [ "$IDP" = "own" ]; then
+  codes="$(for _ in $(seq 1 35); do c -o /dev/null -w '%{http_code}\n' -X POST -d 'username=x&password=y' "$AUTH/login?client_id=x"; done | sort | uniq -c | tr '\n' ' ')"
+  expect_match "P3-6 ログイン POST を連打すると 429（nginx の limit_req）" "$codes" ' 429'
+fi
+
+########################################################################
 echo
 echo "結果: ${pass} 件成功 / ${fail} 件失敗"
 [ "$fail" -eq 0 ]

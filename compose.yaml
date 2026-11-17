@@ -31,6 +31,7 @@ services:
       - "${HTTPS_PORT:-8443}:443"
     environment:
       HTTPS_PORT: ${HTTPS_PORT:-8443}
+      NGINX_AUTH_REQUEST: ${NGINX_AUTH_REQUEST:-/_auth}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/templates:/etc/nginx/templates:ro
@@ -41,28 +42,100 @@ services:
     networks: [edge, app]
     depends_on:
       bff: { condition: service_healthy }
+      auth: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-fsk", "--resolve", "app.localhost:443:127.0.0.1", "https://app.localhost/nginx-health"]
       interval: 3s
       timeout: 2s
       retries: 20
 
+  # ---- BFF: ブラウザとの境目。セッションは Redis、API へはトークンで ----
   bff:
     <<: *go-service
     build: ./services/bff
     environment:
       SERVICE_NAME: bff
+      APP_ORIGIN: https://app.localhost:${HTTPS_PORT:-8443}
       API_URL: http://api:8080
-    networks: [app, backend]
+      REDIS_ADDR: redis:6379
+      # ブラウザが開く URL（外から見える名前）と、BFF が直接呼ぶ URL（コンテナ間の名前）を分けている
+      OIDC_ISSUER: https://auth.localhost:${HTTPS_PORT:-8443}
+      OIDC_AUTHORIZE_URL: https://auth.localhost:${HTTPS_PORT:-8443}/authorize
+      OIDC_END_SESSION_URL: https://auth.localhost:${HTTPS_PORT:-8443}/logout
+      OIDC_TOKEN_URL: http://auth:8080/token
+      OIDC_JWKS_URL: http://auth:8080/jwks
+      OIDC_REVOCATION_URL: http://auth:8080/revoke
+      OIDC_CLIENT_ID: sandbox-bff
+      OIDC_CLIENT_SECRET: ${BFF_CLIENT_SECRET:?make setup で .env を作ってください}
+      REFRESH_SKEW: ${REFRESH_SKEW:-30s}
+      SESSION_IDLE_TTL: ${SESSION_IDLE_TTL:-30m}
+      SESSION_ABSOLUTE_TTL: ${SESSION_ABSOLUTE_TTL:-8h}
+    networks: [app, backend, bff-data]
     depends_on:
       api: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
+  # ---- API: ステートレス。JWT を JWKS で検証するだけ ----
   api:
     <<: *go-service
     build: ./services/api
     environment:
       SERVICE_NAME: api
+      OIDC_ISSUER: https://auth.localhost:${HTTPS_PORT:-8443}
+      OIDC_JWKS_URL: http://auth:8080/jwks
+      API_AUDIENCE: sandbox-api
     networks: [backend]
+
+  # ---- 自作の認証基盤（最小の OIDC プロバイダ） ----
+  auth:
+    <<: *go-service
+    build: ./services/auth
+    environment:
+      SERVICE_NAME: auth
+      ISSUER: https://auth.localhost:${HTTPS_PORT:-8443}
+      DATABASE_URL: postgres://auth:${AUTH_DB_PASSWORD:?make setup で .env を作ってください}@auth-db:5432/auth?sslmode=disable
+      CLIENT_ID: sandbox-bff
+      CLIENT_SECRET: ${BFF_CLIENT_SECRET}
+      REDIRECT_URIS: https://app.localhost:${HTTPS_PORT:-8443}/bff/callback
+      POST_LOGOUT_REDIRECT_URIS: https://app.localhost:${HTTPS_PORT:-8443}/
+      API_AUDIENCE: sandbox-api
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-5m}
+      DEMO_PASSWORD: ${DEMO_PASSWORD}
+      SEED_USERS: "alice:Alice:editor,viewer;bob:Bob:viewer"
+    networks: [app, backend, auth-data]
+    depends_on:
+      auth-db: { condition: service_healthy }
+
+  # ---- データ層（どちらもホストにポートを出さない） ----
+  redis:
+    image: redis:8.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # セッションは消えてよいデータなので永続化しない
+    networks: [bff-data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  auth-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+      POSTGRES_DB: auth
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    networks: [auth-data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "auth"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  auth-db-data:
 
 networks:
   edge:
@@ -72,4 +145,10 @@ networks:
     internal: true
   backend:
     name: auth-sandbox_backend
+    internal: true
+  bff-data:
+    name: auth-sandbox_bff-data
+    internal: true
+  auth-data:
+    name: auth-sandbox_auth-data
     internal: true

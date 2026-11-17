@@ -4,9 +4,45 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>auth-sandbox</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-  <h1>auth-sandbox</h1>
-  <p>nginx が返した静的ページです。</p>
+  <header>
+    <h1>auth-sandbox</h1>
+    <span id="status" class="pill">確認中…</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>セッション</h2>
+      <p class="muted">ブラウザが持っているのは HttpOnly の Cookie（セッション ID）だけです。トークンは BFF の Redis にあり、この画面の JavaScript からは見えません。</p>
+      <dl id="session" class="kv"></dl>
+      <div class="row">
+        <a id="login" class="button" href="/bff/login">ログイン</a>
+        <button id="logout" type="button" hidden>ログアウト</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>API を呼ぶ</h2>
+      <p class="muted">ブラウザ → nginx → BFF（Cookie をトークンに付け替え）→ API。どの層で止まったかは <code>rejected_by</code> で分かります。</p>
+      <div class="row">
+        <button type="button" data-call="GET /api/public/hello">GET /api/public/hello（認証なし）</button>
+        <button type="button" data-call="GET /api/me">GET /api/me</button>
+        <button type="button" data-call="GET /api/notes">GET /api/notes</button>
+      </div>
+      <form id="note-form" class="row">
+        <input id="note-text" maxlength="200" placeholder="メモ（editor ロールのみ書き込み可）" required>
+        <button type="submit">POST /api/notes</button>
+        <button type="button" id="no-csrf">CSRF トークンなしで POST</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>レスポンス</h2>
+      <ol id="log" class="log"></ol>
+    </section>
+  </main>
 </body>
 </html>

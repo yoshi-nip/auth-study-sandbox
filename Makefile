@@ -55,7 +55,8 @@ e2e-up:
 e2e: ## E2E（起動中のスタックに対して。make e2e-up で短い期限で起動してから）
 	@./scripts/e2e.sh
 
-verify: lint test e2e-up e2e ## 完了の定義: 静的検査＋単体テスト＋起動して E2E
+verify: lint test e2e-up ## 完了の定義: 静的検査＋単体テスト＋起動して E2E（飛ばした検査は失敗扱い）
+	@E2E_REQUIRE_REFRESH=1 ./scripts/e2e.sh
 
 scale: ## BFF を3台に増やす（Redis でセッションを共有できているかの確認用）
 	$(COMPOSE) up -d --no-recreate --scale bff=3 --wait

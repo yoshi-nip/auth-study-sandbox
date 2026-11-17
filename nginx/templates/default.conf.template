@@ -8,6 +8,14 @@ upstream bff {
     server bff:8080 resolve;
     keepalive 16;
 }
+upstream auth {
+    zone auth 64k;
+    server auth:8080 resolve;
+}
+
+# ログイン POST のレート制限（IP ごと）。パスワード総当たりを入口で遅くする
+limit_req_zone $binary_remote_addr zone=login:10m rate=20r/m;
+limit_req_status 429;
 
 # --- :80  HTTP は HTTPS へ転送するだけ ---------------------------------------
 server {
@@ -31,6 +39,7 @@ server {
     http2 on;
     server_name app.localhost;
     include /etc/nginx/snippets/security-headers.conf;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
 
     location = /nginx-health {
         access_log off;
@@ -50,9 +59,74 @@ server {
         proxy_pass http://bff;
     }
 
-    # API は必ず BFF を経由させる（nginx から API へは、ネットワーク的に届かない）
-    location /api/ {
+    # 認証の要らない API（ルーティングの確認用）
+    location /api/public/ {
         include /etc/nginx/snippets/proxy.conf;
         proxy_pass http://bff;
+    }
+
+    # API は必ず BFF を経由させる（nginx から API へは、ネットワーク的に届かない）。
+    # 第1の関門: auth_request で「セッションがあるか」だけを BFF に聞き、無ければ nginx がここで 401 を返す。
+    # NGINX_AUTH_REQUEST=off にすると、この関門を外して BFF・API の層だけで止める動きを観察できる。
+    location /api/ {
+        auth_request ${NGINX_AUTH_REQUEST};
+        error_page 401 = @unauthenticated;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://bff;
+    }
+
+    location = /_auth {
+        internal;                              # 外から直接は呼べない（nginx 内部のサブリクエスト専用）
+        proxy_pass http://bff/bff/session/check;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass_request_body off;           # 判定に本文は要らない
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location @unauthenticated {
+        default_type application/json;
+        return 401 '{"error":"unauthenticated","rejected_by":"nginx"}\n';
+    }
+}
+
+# --- auth.localhost: 自作の認証基盤（IdP） -----------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name auth.localhost;
+    include /etc/nginx/snippets/security-headers.conf;
+    # ログイン後に app.localhost のコールバックへリダイレクトするので、form-action にアプリのオリジンも入れる
+    add_header Content-Security-Policy "default-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://app.localhost:${HTTPS_PORT}" always;
+
+    location = /login {
+        limit_req zone=login burst=10 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://auth;
+    }
+
+    location / {
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://auth;
+    }
+}
+
+# --- kc.localhost: Keycloak（compose.keycloak.yaml で起動したときだけ使う） ----------
+# upstream ブロックではなく変数で proxy_pass すると、名前解決がリクエスト時になる。
+# Keycloak が起動していなくても nginx は起動でき、起動したら自動でつながる。
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name kc.localhost;
+    include /etc/nginx/snippets/security-headers.conf;
+    proxy_buffer_size 16k;     # Keycloak は大きな Cookie/ヘッダを返す
+    proxy_buffers 8 16k;
+
+    location / {
+        set $keycloak http://keycloak:8080;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass $keycloak;
     }
 }
