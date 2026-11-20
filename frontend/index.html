@@ -5,42 +5,107 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>auth-sandbox</title>
   <link rel="stylesheet" href="/app.css">
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </head>
 <body>
-  <header>
-    <h1>auth-sandbox</h1>
-    <span id="status" class="pill">確認中…</span>
+  <header class="top">
+    <div class="brand">
+      <h1>auth-sandbox</h1>
+      <p>どの層で何を止めるかを、通信の流れで見る</p>
+    </div>
+    <div class="who">
+      <span id="status" class="pill">確認中…</span>
+      <a id="login" class="button primary" href="/bff/login">ログイン</a>
+      <button id="logout" type="button" hidden>ログアウト</button>
+    </div>
   </header>
 
   <main>
-    <section class="card">
-      <h2>セッション</h2>
-      <p class="muted">ブラウザが持っているのは HttpOnly の Cookie（セッション ID）だけです。トークンは BFF の Redis にあり、この画面の JavaScript からは見えません。</p>
-      <dl id="session" class="kv"></dl>
-      <div class="row">
-        <a id="login" class="button" href="/bff/login">ログイン</a>
-        <button id="logout" type="button" hidden>ログアウト</button>
+    <section class="card actions" aria-label="操作">
+      <div class="group">
+        <h2>読む</h2>
+        <div class="row">
+          <button type="button" data-call="GET /api/public/hello">GET /api/public/hello <small>認証なし</small></button>
+          <button type="button" data-call="GET /api/me">GET /api/me</button>
+          <button type="button" data-call="GET /api/notes">GET /api/notes</button>
+        </div>
+      </div>
+      <div class="group">
+        <h2>書く <small>editor ロールのみ</small></h2>
+        <form id="note-form" class="row">
+          <input id="note-text" maxlength="200" placeholder="メモ" required>
+          <button type="submit" class="primary">POST /api/notes</button>
+        </form>
+      </div>
+      <div class="group">
+        <h2>攻撃してみる</h2>
+        <div class="row">
+          <button type="button" id="no-csrf" class="warn">CSRF トークンなしで POST</button>
+          <button type="button" id="read-cookie" class="warn">document.cookie を読む</button>
+        </div>
+      </div>
+      <div class="group">
+        <h2>流れだけ見る</h2>
+        <div class="row">
+          <button type="button" id="demo-login">ログイン（認可コード + PKCE）</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="workspace">
+      <section class="card stage" id="stage" aria-label="通信の流れの図">
+        <div class="stage-head">
+          <div class="tabs" role="tablist" aria-label="図の種類">
+            <button type="button" role="tab" data-view="network" aria-selected="true">構成図</button>
+            <button type="button" role="tab" data-view="sequence" aria-selected="false">シーケンス図</button>
+          </div>
+          <span id="scenario-title" class="scenario-title">操作を選ぶと、ここで通信の流れを再生します</span>
+        </div>
+        <div id="view-network" class="view">
+          <svg id="net" class="net" role="img" aria-label="ブラウザ・nginx・BFF・Redis・API・認証基盤・PostgreSQL の構成図"></svg>
+        </div>
+        <div id="view-sequence" class="view" hidden>
+          <div id="seq-scroll" class="seq-scroll">
+            <svg id="seq" class="seq" role="img" aria-label="シーケンス図"></svg>
+          </div>
+        </div>
+      </section>
+
+      <aside class="card detail" id="detail" aria-live="polite"></aside>
+    </div>
+
+    <section class="card timeline" aria-label="通信の一覧と再生">
+      <div class="timeline-head">
+        <h2>通信の流れ</h2>
+        <ul class="legend">
+          <li class="tone-req">リクエスト</li>
+          <li class="tone-ok">成功の応答</li>
+          <li class="tone-err">拒否・エラー</li>
+          <li class="tone-info">裏で起きること</li>
+        </ul>
+        <div class="controls">
+          <span id="step-count" class="step-count"></span>
+          <select id="speed" aria-label="再生速度">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+          </select>
+          <button type="button" id="prev" aria-label="前のステップ">‹</button>
+          <button type="button" id="play" class="primary play"><span class="play-icon" aria-hidden="true"></span><span id="play-label">再生</span></button>
+          <button type="button" id="next" aria-label="次のステップ">›</button>
+        </div>
+      </div>
+      <div class="progress"><div id="progress-bar"></div></div>
+      <div class="hops-wrap">
+        <table class="hops">
+          <thead><tr><th>#</th><th>経路</th><th>種類</th><th>内容</th></tr></thead>
+          <tbody id="hops"></tbody>
+        </table>
       </div>
     </section>
 
     <section class="card">
-      <h2>API を呼ぶ</h2>
-      <p class="muted">ブラウザ → nginx → BFF（Cookie をトークンに付け替え）→ API。どの層で止まったかは <code>rejected_by</code> で分かります。</p>
-      <div class="row">
-        <button type="button" data-call="GET /api/public/hello">GET /api/public/hello（認証なし）</button>
-        <button type="button" data-call="GET /api/me">GET /api/me</button>
-        <button type="button" data-call="GET /api/notes">GET /api/notes</button>
-      </div>
-      <form id="note-form" class="row">
-        <input id="note-text" maxlength="200" placeholder="メモ（editor ロールのみ書き込み可）" required>
-        <button type="submit">POST /api/notes</button>
-        <button type="button" id="no-csrf">CSRF トークンなしで POST</button>
-      </form>
-    </section>
-
-    <section class="card">
-      <h2>レスポンス</h2>
+      <h2>レスポンス（実際の値）</h2>
       <ol id="log" class="log"></ol>
     </section>
   </main>
