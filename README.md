@@ -10,6 +10,32 @@ Docker だけで、**リバースプロキシ（L7）→ BFF → API** の構成
 
 > 自作の認証基盤は学習用です。本番では Keycloak などの実績ある製品やマネージドサービスを使ってください。
 
+## 画面のイメージ
+
+ボタンを押すと本物のリクエストを送り、返ってきた結果から「どこを通って、どこで止まったか」を図で再生します。
+
+**未ログインで `GET /api/me`** — nginx の `auth_request` が BFF に問い合わせ、セッションがないので nginx で 401（第1の関門）。
+
+![未ログインで GET /api/me を呼ぶと nginx で 401 になる流れ](docs/images/flow-01-nginx-401.gif)
+
+**CSRF トークンなしで POST**（シーケンス図）— nginx は通るが、BFF が `Origin` と `X-CSRF-Token` を確かめて 403。API には届かない。
+
+![CSRF トークンなしの POST が BFF で 403 になる流れ](docs/images/flow-02-csrf-403-sequence.gif)
+
+<details>
+<summary><strong>ログイン済みで <code>GET /api/notes</code></strong> — 期限が近いアクセストークンを BFF がリフレッシュしてから API へ（ブラウザは何もしない）</summary>
+
+![BFF がトークンをリフレッシュしてから JWT を付けて API を呼ぶ流れ](docs/images/flow-03-api-200.gif)
+
+</details>
+
+<details>
+<summary>画面全体</summary>
+
+![操作ボタン・構成図・ステップの解説・通信の一覧が並んだ画面全体](docs/images/overview.png)
+
+</details>
+
 ## 構成
 
 ```mermaid

@@ -73,7 +73,8 @@ input { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var
 .stage.has-scenario .scenario-title { color: var(--fg); font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .view { overflow-x: auto; }
 .net { display: block; width: 100%; min-width: 560px; height: auto; }
-.seq-scroll { max-height: 470px; overflow: auto; }
+.seq-x { overflow-x: auto; }
+.seq-scroll { max-height: 420px; overflow-y: auto; overflow-x: hidden; width: max-content; min-width: 100%; }
 .seq { display: block; }
 
 .detail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }

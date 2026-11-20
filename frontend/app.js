@@ -369,7 +369,7 @@ function loginDemo() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   net = new NetworkView($('#net'));
-  seq = new SequenceView($('#seq'), $('#seq-scroll'));
+  seq = new SequenceView($('#seq-head'), $('#seq'), $('#seq-scroll'), $('#seq-x'));
   renderHops();
   updateControls();
 

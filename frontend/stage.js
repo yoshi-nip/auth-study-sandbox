@@ -246,10 +246,13 @@ const ROW_H = 46;
 const HEAD_H = 64;
 const LEFT = 44;
 
+// 見出し（役者の名前）は別の SVG にして、縦にスクロールしても隠れないようにする
 export class SequenceView {
-  constructor(root, scroller) {
+  constructor(head, root, scroller, outer) {
+    this.head = head;
     this.root = root;
-    this.scroller = scroller;
+    this.scroller = scroller; // 縦スクロール（本体だけ）
+    this.outer = outer; // 横スクロール（見出しと本体をまとめて）
     this.gen = 0;
   }
 
@@ -257,7 +260,9 @@ export class SequenceView {
     this.gen++;
     const gen = this.gen;
     const r = this.root;
+    const hd = this.head;
     r.replaceChildren();
+    hd.replaceChildren();
     if (!steps.length) return Promise.resolve();
 
     const used = new Set();
@@ -265,13 +270,15 @@ export class SequenceView {
     const cols = ACTOR_ORDER.filter((id) => used.has(id));
     const xOf = (id) => LEFT + 40 + cols.indexOf(id) * COL_W + COL_W / 2;
     const width = LEFT + 40 + cols.length * COL_W + 24;
-    const height = HEAD_H + steps.length * ROW_H + 24;
-    r.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    const height = steps.length * ROW_H + 16;
     // 枠に収まるなら縮めて収める。縮めすぎると文字が読めないので、それ以上は横スクロールにする
-    const avail = this.scroller.clientWidth || width;
+    const avail = this.outer.clientWidth || width;
     const scale = Math.min(1, Math.max(0.72, avail / width));
-    r.setAttribute('width', String(Math.floor(width * scale)));
-    r.setAttribute('height', String(Math.ceil(height * scale)));
+    for (const [el, h] of [[hd, HEAD_H], [r, height]]) {
+      el.setAttribute('viewBox', `0 0 ${width} ${h}`);
+      el.setAttribute('width', String(Math.floor(width * scale)));
+      el.setAttribute('height', String(Math.ceil(h * scale)));
+    }
 
     r.append(svg('defs', {},
       ...['req', 'ok', 'err', 'info'].map((t) => svg('marker', {
@@ -281,17 +288,18 @@ export class SequenceView {
     // 見出しとライフライン
     for (const id of cols) {
       const x = xOf(id);
-      r.append(
-        svg('line', { class: 'lifeline', x1: x, y1: HEAD_H - 8, x2: x, y2: height - 8 }),
+      hd.append(
+        svg('line', { class: 'lifeline', x1: x, y1: 50, x2: x, y2: HEAD_H }),
         svg('rect', { class: 'seq-head', x: x - COL_W / 2 + 8, y: 10, width: COL_W - 16, height: 40, rx: 9 }),
         svg('text', { class: 'seq-head-text', x, y: 35, 'text-anchor': 'middle' }, ACTORS[id].name),
       );
+      r.append(svg('line', { class: 'lifeline', x1: x, y1: 0, x2: x, y2: height }));
     }
 
     let current = null;
     for (let k = 0; k <= i && k < steps.length; k++) {
       const s = steps[k];
-      const y = HEAD_H + k * ROW_H + 28;
+      const y = k * ROW_H + 34;
       const isCur = k === i;
       const g = svg('g', { class: `seq-row tone-${s.tone}${isCur ? ' current' : ''}${s.reject ? ' reject' : ''}`, 'data-step': k });
       g.append(
@@ -319,7 +327,7 @@ export class SequenceView {
     }
 
     if (current) {
-      const top = (HEAD_H + i * ROW_H - 40) * scale;
+      const top = (i * ROW_H - 20) * scale;
       const sc = this.scroller;
       if (top < sc.scrollTop || top + (ROW_H + 80) * scale > sc.scrollTop + sc.clientHeight) {
         sc.scrollTo({ top: Math.max(0, top - sc.clientHeight / 3), behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
