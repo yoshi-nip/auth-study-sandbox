@@ -6,7 +6,7 @@ KC       := docker compose -f compose.yaml -f compose.keycloak.yaml
 E2E_ENV := ACCESS_TOKEN_TTL=15s REFRESH_SKEW=5s
 
 .PHONY: help setup up down restart logs ps fmt fmt-check vet test check-sensitive compose-check \
-        lint verify e2e e2e-up up-keycloak down-keycloak e2e-keycloak scale clean
+        lint verify trust-local-cert e2e e2e-up up-keycloak down-keycloak e2e-keycloak scale clean
 
 help: ## コマンド一覧
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -14,8 +14,12 @@ help: ## コマンド一覧
 setup: ## 初回: .env（ランダムな秘密）・ローカル証明書・git フック
 	@./scripts/setup.sh
 
+trust-local-cert: ## macOS: ローカルサーバー証明書を現在のユーザーに信頼登録（OS の承認が必要）
+	@./scripts/trust-local-cert.sh
+
 up: ## 起動（自作 OIDC 構成）
-	$(COMPOSE) up -d --build --wait
+	$(COMPOSE) up -d --build --wait --wait-timeout 180
+	@./scripts/wait-ready.sh
 
 down: ## 停止（データは残す）
 	$(COMPOSE) down --remove-orphans
@@ -50,7 +54,8 @@ compose-check:
 lint: fmt-check vet check-sensitive compose-check
 
 e2e-up:
-	$(E2E_ENV) $(COMPOSE) up -d --build --wait
+	$(E2E_ENV) $(COMPOSE) up -d --build --wait --wait-timeout 180
+	@./scripts/wait-ready.sh
 
 e2e: ## E2E（起動中のスタックに対して。make e2e-up で短い期限で起動してから）
 	@./scripts/e2e.sh
@@ -59,10 +64,11 @@ verify: lint test e2e-up ## 完了の定義: 静的検査＋単体テスト＋�
 	@E2E_REQUIRE_REFRESH=1 ./scripts/e2e.sh
 
 scale: ## BFF を3台に増やす（Redis でセッションを共有できているかの確認用）
-	$(COMPOSE) up -d --no-recreate --scale bff=3 --wait
+	$(COMPOSE) up -d --no-recreate --scale bff=3 --wait --wait-timeout 180
 
 up-keycloak: ## 認証基盤を Keycloak に差し替えて起動
-	$(KC) up -d --build --wait
+	$(KC) up -d --build --wait --wait-timeout 180
+	@./scripts/wait-ready.sh
 
 down-keycloak:
 	$(KC) down --remove-orphans

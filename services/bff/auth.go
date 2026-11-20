@@ -230,7 +230,8 @@ func (a *app) freshToken(ctx context.Context, sid string, s *session) (string, e
 		return s.AccessToken, nil
 	}
 	lock := sessionKey(sid) + ":refresh-lock"
-	got, err := a.sessions.rdb.SetNX(ctx, lock, hostname, 10*time.Second).Result()
+	owner := randomToken(24)
+	got, err := a.sessions.rdb.SetNX(ctx, lock, owner, 30*time.Second).Result()
 	if err != nil {
 		return "", err
 	}
@@ -247,14 +248,24 @@ func (a *app) freshToken(ctx context.Context, sid string, s *session) (string, e
 		}
 		return "", errors.New("refresh wait timeout")
 	}
-	defer a.sessions.rdb.Del(context.WithoutCancel(ctx), lock)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		// 自分の期限が切れて別の処理がロックを取っていたら、そのロックは消さない。
+		_ = a.sessions.rdb.Eval(cleanupCtx, `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`, []string{lock}, owner).Err()
+	}()
 
 	// ロックを取る直前に、別のリクエストがリフレッシュを終えていたかもしれないので読み直す
-	if s2, err := a.sessions.get(ctx, sid); err == nil && s2 != nil {
-		s = s2
-		if time.Until(s.AccessExpiry) > a.cfg.refreshSkew {
-			return s.AccessToken, nil
-		}
+	s2, err := a.sessions.get(ctx, sid)
+	if err != nil {
+		return "", err
+	}
+	if s2 == nil {
+		return "", errSessionGone
+	}
+	s = s2
+	if time.Until(s.AccessExpiry) > a.cfg.refreshSkew {
+		return s.AccessToken, nil
 	}
 
 	nt, err := a.oauth.TokenSource(a.oauthContext(ctx), &oauth2.Token{RefreshToken: s.RefreshToken}).Token()
@@ -268,7 +279,16 @@ func (a *app) freshToken(ctx context.Context, sid string, s *session) (string, e
 	if nt.RefreshToken != "" {
 		s.RefreshToken = nt.RefreshToken
 	}
-	if err := a.sessions.save(ctx, sid, s); err != nil {
+	if err := a.sessions.update(ctx, sid, s); err != nil {
+		// 更新中にログアウト・期限切れになった場合、新しく発行されたトークンも失効させる。
+		// キャンセルされたリクエストとは独立した、上限付きの後始末。
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if a.cfg.revocationURL != "" && s.RefreshToken != "" {
+			if revokeErr := a.revoke(cleanupCtx, s.RefreshToken); revokeErr != nil {
+				slog.Warn("refresh cleanup revocation failed")
+			}
+		}
 		return "", err
 	}
 	slog.Info("access token refreshed", "sub", s.Subject, "expires_at", nt.Expiry)
@@ -280,13 +300,17 @@ func (a *app) freshToken(ctx context.Context, sid string, s *session) (string, e
 // POST /bff/logout: セッションを消し、リフレッシュトークンを失効させ、
 // 認証基盤側の SSO セッションも終わらせるための URL を返す（フロントがそこへ遷移する）。
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {
-	sid, s := sessionFrom(r)
-	if a.cfg.revocationURL != "" && s.RefreshToken != "" {
+	sid, _ := sessionFrom(r)
+	s, err := a.sessions.take(r.Context(), sid)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if s != nil && a.cfg.revocationURL != "" && s.RefreshToken != "" {
 		if err := a.revoke(r.Context(), s.RefreshToken); err != nil {
 			slog.Warn("revoke failed", "err", err) // 失効に失敗してもログアウト自体は進める
 		}
 	}
-	_ = a.sessions.delete(r.Context(), sid)
 	clearCookie(w, sessionCookie)
 
 	logoutURL := ""

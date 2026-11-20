@@ -27,8 +27,8 @@ services:
     image: nginx:1.29-alpine
     restart: unless-stopped
     ports:
-      - "${HTTP_PORT:-8080}:80"
-      - "${HTTPS_PORT:-8443}:443"
+      - "127.0.0.1:${HTTP_PORT:-8080}:80"
+      - "127.0.0.1:${HTTPS_PORT:-8443}:443"
       - "127.0.0.1:${L4_PORT:-9000}:9000"   # L4（TCP）プロキシの練習用。ローカルホストからだけ
     environment:
       HTTPS_PORT: ${HTTPS_PORT:-8443}
@@ -38,14 +38,15 @@ services:
       - ./nginx/templates:/etc/nginx/templates:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
       - ./nginx/stream.d:/etc/nginx/stream.d:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/certs/server.crt:/etc/nginx/certs/server.crt:ro
+      - ./nginx/certs/server.key:/etc/nginx/certs/server.key:ro
       - ./frontend:/usr/share/nginx/html:ro
     networks: [edge, app]
     depends_on:
       bff: { condition: service_healthy }
       auth: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "curl", "-fsk", "--resolve", "app.localhost:443:127.0.0.1", "https://app.localhost/nginx-health"]
+      test: ["CMD", "curl", "-fsk", "--resolve", "app.localhost:443:127.0.0.1", "https://app.localhost/api/public/hello"]
       interval: 3s
       timeout: 2s
       retries: 20

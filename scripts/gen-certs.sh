@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ローカル用の TLS 証明書を作る（nginx/certs/。git には載せない）。
-#   mkcert があれば mkcert（OS に信頼されたローカル CA）を使う。
+#   mkcert があれば mkcert（CA の信頼登録は別途必要）を使う。
 #   なければ openssl で「自前の CA」＋「その CA が署名したサーバー証明書」を作る。
-#   後者の場合、ブラウザは警告を出す。nginx/certs/ca.crt を OS に信頼させるか、警告を承認して進む。
+#   信頼未登録の場合、ブラウザは警告を出す。macOS では make trust-local-cert でサーバー証明書を信頼登録する。
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dir="$root/nginx/certs"
@@ -33,4 +33,4 @@ openssl x509 -req -in "$dir/server.csr" -CA "$dir/ca.crt" -CAkey "$dir/ca.key" -
   -extfile <(printf "subjectAltName=%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature" "$san") 2>/dev/null
 rm -f "$dir/server.csr" "$dir/ca.srl"
 chmod 644 "$dir/server.key"   # nginx コンテナ（別ユーザー）から読めるように。ローカル専用の鍵
-echo "[certs] openssl で自前 CA とサーバー証明書を作りました（nginx/certs/ca.crt を信頼させると警告が消えます）"
+echo "[certs] openssl で自前 CA とサーバー証明書を作りました（macOS は make trust-local-cert でサーバー証明書を信頼登録できます）"

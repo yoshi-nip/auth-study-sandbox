@@ -77,6 +77,41 @@ func (s *sessionStore) save(ctx context.Context, sid string, sess *session) erro
 	return s.rdb.Set(ctx, sessionKey(sid), b, ttl).Err()
 }
 
+// update は存在するセッションだけを原子的に更新する。
+// ログアウトや期限切れによる削除後に、進行中のリフレッシュが再作成してはいけない。
+func (s *sessionStore) update(ctx context.Context, sid string, sess *session) error {
+	ttl := s.ttl(sess, time.Now())
+	if ttl <= 0 {
+		return errSessionGone
+	}
+	b, err := json.Marshal(sess)
+	if err != nil {
+		return err
+	}
+	err = s.rdb.SetArgs(ctx, sessionKey(sid), b, redis.SetArgs{Mode: "XX", TTL: ttl}).Err()
+	if errors.Is(err, redis.Nil) {
+		return errSessionGone
+	}
+	return err
+}
+
+// take は最新のセッションを読み出すと同時に削除する。
+// ログアウトは失効先への通信よりも先にこれを行い、以後の更新を拒否する。
+func (s *sessionStore) take(ctx context.Context, sid string) (*session, error) {
+	b, err := s.rdb.GetDel(ctx, sessionKey(sid)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var sess session
+	if err := json.Unmarshal(b, &sess); err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
 // get はセッションを読み、アイドル期限を延ばす。無い・期限切れなら nil。
 func (s *sessionStore) get(ctx context.Context, sid string) (*session, error) {
 	b, err := s.rdb.Get(ctx, sessionKey(sid)).Bytes()

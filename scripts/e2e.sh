@@ -69,6 +69,11 @@ expect "P0-3 http でも知らない Host には応答しない" \
 published="$(docker compose ps --format json | jq -r 'select((.Publishers // []) | map(select(.PublishedPort > 0)) | length > 0) | .Service' | sort -u | tr '\n' ' ')"
 expect_match "P0-4 ホストにポートを公開しているのは nginx だけ" "$published" '^nginx $'
 
+# 公開先は全ポートで loopback に限る。実際の Docker バインドを検査する。
+bindings="$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$(docker compose ps -q nginx)")"
+expect "P0-7 nginx の全公開ポートは 127.0.0.1 に限定" \
+  "$(printf '%s' "$bindings" | jq '[.[]? // [] | .[] | .HostIp] | length > 0 and all(. == "127.0.0.1")')" "true"
+
 nginx_to() { docker compose exec -T nginx curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$1" 2>/dev/null; }
 expect "P0-5 nginx → BFF は届く（陽性対照）" "$(nginx_to http://bff:8080/healthz)" "200"
 expect "P0-5 nginx → API は届かない" "$(nginx_to http://api:8080/healthz)" "000"
@@ -113,7 +118,7 @@ post_note() { # post_note <jar> <text> [csrf] [origin]
 redis_sessions() { docker compose exec -T redis redis-cli --scan --pattern 'sess:*' | grep -vc refresh-lock; }
 
 ########################################################################
-section "Phase 1・2 — BFF のセッションと自作 OIDC（IdP=$IDP）"
+section "Phase 1・2 — BFF のセッションと自作 OIDC（IdP=${IDP}）"
 
 body="$(c "$APP/api/me")"
 expect_match "P1-1 未ログインの /api/me は 401（nginx が止める）" "$body" '"rejected_by":"nginx"'
@@ -236,7 +241,7 @@ if [ "$IDP" = "own" ] && [ "$ttl_cfg" = "15s" ]; then
   sleep 11   # 期限 15 秒・5 秒前にリフレッシュ → 10 秒を過ぎた後の API 呼び出しでリフレッシュされる
   expect "P3-1 期限間近でも API 呼び出しは成功する" "$(cj "$A" -o /dev/null -w '%{http_code}' "$APP/api/me")" "200"
   exp2="$(cj "$A" "$APP/bff/session" | jq -r .access_token_expires_at)"
-  if [[ "$exp2" > "$exp1" ]]; then ok "P3-1 BFF がアクセストークンをリフレッシュした（$exp1 → $exp2）"; else ng "P3-1 BFF がリフレッシュした" "$exp1 → $exp2"; fi
+  if [[ "$exp2" > "$exp1" ]]; then ok "P3-1 BFF がアクセストークンをリフレッシュした（$exp1 → ${exp2}）"; else ng "P3-1 BFF がリフレッシュした" "$exp1 → $exp2"; fi
 else
   if [ "${E2E_REQUIRE_REFRESH:-0}" = "1" ]; then
     ng "P3-1 BFF のリフレッシュ" "ACCESS_TOKEN_TTL=15s で起動していない（make e2e-up で起動する）"
@@ -252,7 +257,7 @@ expect_match "P3-3 ログアウトで IdP のログアウト URL が返る" "$lo
 expect_no_match "P3-3 ログアウト URL にトークンを含めない" "$logout" 'eyJ'
 expect "P3-3 ログアウト後の /api/me は 401" "$(cj "$A" -o /dev/null -w '%{http_code}' "$APP/api/me")" "401"
 after="$(redis_sessions)"
-if [ "$after" -lt "$before" ]; then ok "P3-3 Redis のセッションが消えた（$before → $after）"; else ng "P3-3 Redis のセッションが消えた" "$before → $after"; fi
+if [ "$after" -lt "$before" ]; then ok "P3-3 Redis のセッションが消えた（$before → ${after}）"; else ng "P3-3 Redis のセッションが消えた" "$before → $after"; fi
 if [ "$IDP" = "own" ]; then
   revoked_after="$(docker compose exec -T auth-db psql -U auth -tAc 'select count(*) from refresh_tokens where revoked' | tr -d '\r')"
   if [ "$revoked_after" -gt "$revoked_before" ]; then ok "P3-3 リフレッシュトークンが失効した"; else ng "P3-3 リフレッシュトークンが失効した" "$revoked_before → $revoked_after"; fi
@@ -291,7 +296,10 @@ expect_match "P5-1 L4 では nginx の auth_request が効かないが、BFF の
   "$(curl -s --max-time 5 "$L4/api/me")" '"rejected_by":"bff"'
 
 if [ "$IDP" = "own" ]; then
-  docker compose up -d --no-recreate --scale bff=3 --wait >/dev/null 2>&1
+  docker compose up -d --no-recreate --scale bff=3 --wait --wait-timeout 180 >/dev/null 2>&1 || {
+    ng "P5-2 BFF の台数変更" "3台への変更・起動待ちに失敗"
+    exit 1
+  }
   sleep 6   # nginx の resolver（valid=5s）が新しい BFF の IP を引き直すのを待つ
   S="$WORK/scale.jar"
   login_as "$S" alice >/dev/null
@@ -302,12 +310,35 @@ if [ "$IDP" = "own" ]; then
     seen="$seen $(echo "$res" | head -1 | jq -r .served_by)"
   done
   n="$(echo "$seen" | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l | tr -d ' ')"
-  if [ "$n" -ge 2 ]; then ok "P5-2 BFF 3台に振り分けられる（応答した台: $n）"; else ng "P5-2 BFF 3台に振り分けられる" "応答した台: $n"; fi
+  if [ "$n" -ge 2 ]; then ok "P5-2 BFF 3台に振り分けられる（応答した台: ${n}）"; else ng "P5-2 BFF 3台に振り分けられる" "応答した台: $n"; fi
   expect_no_match "P5-2 どの台に当たっても同じセッションで 200（Redis で共有）" "$codes" '[^ ]*[^2 ][0-9][0-9]'
   api_codes="$(for _ in $(seq 1 6); do cj "$S" -o /dev/null -w '%{http_code} ' "$APP/api/me"; done)"
   expect_match "P5-2 どの台からでも API を呼べる" "$api_codes" '^(200 ){6}$'
-  docker compose up -d --no-recreate --scale bff=1 --wait >/dev/null 2>&1
+  docker compose up -d --no-recreate --scale bff=1 --wait --wait-timeout 180 >/dev/null 2>&1 || {
+    ng "P5-2 BFF の台数変更" "1台への変更・起動待ちに失敗"
+    exit 1
+  }
   sleep 6
+fi
+
+########################################################################
+section "追加の境界検証 — ログと並行ログアウト"
+marker="e2e-query-$(openssl rand -hex 12)"
+c -o /dev/null "$APP/bff/callback?code=$marker&state=$marker"
+# アクセスログには到達したパスが残り、クエリの認可コード/state は残らない。
+access_logs="$(docker compose logs --no-color --no-log-prefix --since 1m nginx 2>/dev/null)"
+expect_match "P3-7 コールバックのパスはアクセスログに残る" "$access_logs" '"uri":"/bff/callback"'
+expect_no_match "P3-7 クエリの機密値はアクセスログに残らない" "$access_logs" "$marker"
+unset access_logs
+
+if docker build --target tests -t auth-sandbox-bff-tests services/bff >"$WORK/session-build.log" 2>&1; then
+  if docker run --rm --network auth-sandbox_bff-data -e TEST_REDIS_ADDR=redis:6379 auth-sandbox-bff-tests >"$WORK/session-tests.log" 2>&1; then
+    ok "P3-8 実 Redis でログアウトとリフレッシュが競合してもセッションは復活しない（期限切れ・トークン失効も確認）"
+  else
+    ng "P3-8 セッション競合テスト" "詳細: .e2e/session-tests.log"
+  fi
+else
+  ng "P3-8 セッション競合テストのビルド" "詳細: .e2e/session-build.log"
 fi
 
 # レート制限は最後に（他のログインを巻き込まないように）
