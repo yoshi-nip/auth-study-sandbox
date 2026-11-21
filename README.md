@@ -30,6 +30,19 @@ Docker だけで、**リバースプロキシ（L7）→ BFF → API** の構成
 </details>
 
 <details>
+<summary><strong>ログインの流れ（認可コード + PKCE）</strong> — 実際にログインして戻ってきたところで「いま起きたこと」を再生（2倍速）</summary>
+
+シーケンス図: ブラウザ・nginx・BFF・Redis・認証基盤・PostgreSQL の間の 25 ステップ。トークンは BFF にだけ届き、ブラウザには `__Host-sid` Cookie だけが渡ります。
+
+![ログインの流れ（シーケンス図）](docs/images/flow-04-login-sequence.gif)
+
+構成図: 同じ流れを、パケットが構成図の上を動く形で。
+
+![ログインの流れ（構成図）](docs/images/flow-05-login-network.gif)
+
+</details>
+
+<details>
 <summary>画面全体</summary>
 
 ![操作ボタン・構成図・ステップの解説・通信の一覧が並んだ画面全体](docs/images/overview.png)
