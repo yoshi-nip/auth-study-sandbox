@@ -89,9 +89,11 @@ function renderSession() {
   if (!s) {
     pill.textContent = '未ログイン';
     pill.className = 'pill off';
+    pill.title = 'セッション Cookie がない（または期限切れ）';
   } else {
-    pill.textContent = `${s.user.name}（${s.user.username}）`;
+    pill.textContent = `${s.user.name}（${s.user.username}）でログイン中`;
     pill.className = 'pill on';
+    pill.title = `ロール: ${(s.user.roles || []).join(', ')}`;
   }
   $('#login').hidden = !!s;
   $('#logout').hidden = !s;

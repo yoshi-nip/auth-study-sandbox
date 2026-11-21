@@ -33,7 +33,7 @@ const LINKS = [
   ['nginx', 'idp', 'app'],
   ['bff', 'redis', 'bff-data'],
   ['bff', 'api', 'backend'],
-  ['bff', 'idp', 'backend'],
+  ['bff', 'idp', 'app'],
   ['api', 'idp', 'backend（JWKS）'],
   ['idp', 'db', 'auth-data'],
 ];
@@ -110,7 +110,7 @@ export class NetworkView {
       svg('rect', { class: 'zone zone-host', x: 8, y: 132, width: 170, height: 164, rx: 14 }),
       svg('text', { class: 'zone-label', x: 22, y: 152 }, 'あなたの PC'),
       svg('rect', { class: 'zone zone-docker', x: 196, y: 18, width: 814, height: 424, rx: 16 }),
-      svg('text', { class: 'zone-label', x: 212, y: 40 }, 'Docker（ホストに公開しているのは nginx の 127.0.0.1:8443 だけ）'),
+      svg('text', { class: 'zone-label', x: 212, y: 40 }, 'Docker（ホストに公開しているのは nginx だけ。127.0.0.1 の 8443・8080・9000）'),
     );
 
     // 届かない経路: nginx → API

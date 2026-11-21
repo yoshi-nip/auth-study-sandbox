@@ -30,9 +30,11 @@ small { color: var(--muted); font-weight: 400; font-size: 12px; }
 .brand h1 { font-size: 20px; letter-spacing: 0.01em; }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .who { display: flex; align-items: center; gap: 8px; }
-.pill { font-size: 13px; padding: 3px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--card); }
-.pill.on { color: var(--ok); border-color: var(--ok); }
-.pill.off { color: var(--muted); }
+/* 状態の表示（ボタンではない）。枠を付けず、色の点で表す */
+.pill { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
+.pill.on { color: var(--ok); }
+.pill.on::before { background: var(--ok); }
 
 main { max-width: 1240px; margin: 0 auto; padding: 0 16px 40px; display: grid; gap: 14px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }

@@ -122,26 +122,38 @@ export function apiCall(c) {
     return steps.concat(returnPath('api', status, data));
   }
 
-  const nginxSkipped = by === 'bff' && status === 401; // auth_request を off にしている、または確認の直後に期限切れ
+  const err = data && typeof data === 'object' ? data.error : undefined;
+  // BFF の入口（withSession）での 401: auth_request を off にしている、または確認の直後に期限切れ
+  const nginxSkipped = by === 'bff' && status === 401 && err === 'unauthenticated';
+  // リフレッシュに失敗して BFF がセッションを消した 401（ここまでは関門もセッション確認も通っている）
+  const sessionExpired = by === 'bff' && status === 401 && err === 'session expired';
 
   // 2〜4. nginx の auth_request
   if (!nginxSkipped) {
     steps.push(step({
-      from: 'nginx', to: 'bff', proto: 'HTTP', chip: 'GET /_auth',
+      from: 'nginx', to: 'bff', proto: 'HTTP', tone: 'info', chip: 'GET /_auth（確認だけ）',
       summary: 'auth_request でセッションを問い合わせ',
-      title: 'nginx が BFF に「通してよいか」を聞く',
-      body: '`location /api/` には `auth_request` があり、本体を渡す前に BFF の `/bff/session/check` へサブリクエストを送ります。本文は送らず、Cookie だけで判定させます。',
-      kv: [['サブリクエスト', '/_auth → /bff/session/check'], ['本文', '送らない（proxy_pass_request_body off）']],
+      title: 'nginx が BFF に「通してよいか」だけを聞く',
+      body: '`location /api/` には `auth_request` があります。元の `' + method + ' ' + path + '` は nginx で待たせたまま、BFF の `/bff/session/check` へ確認用のサブリクエストだけを送ります。本文は送らず、Cookie だけで判定させます。',
+      kv: [['サブリクエスト', '/_auth → /bff/session/check'], ['元のリクエスト', 'まだ nginx で止めている'], ['本文', '送らない（proxy_pass_request_body off）']],
     }));
-    steps.push(step({
-      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: c.hadSession ? 'GET sess:… → あり' : 'Cookie なし',
-      summary: 'セッションの有無を確認',
-      title: 'BFF が Redis でセッションを探す',
-      body: c.hadSession
-        ? 'Cookie のセッション ID をキーに Redis を引きます。期限（TTL）が切れていれば見つかりません。'
-        : 'Cookie がないので、探すまでもなくセッションなしです。',
-      kv: [['見るもの', 'セッションの存在と期限']],
-    }));
+    if (c.hadSession) {
+      steps.push(step({
+        from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', tone: 'info', chip: 'GET sess:… → あり',
+        summary: 'セッションの有無を確認',
+        title: 'BFF が Redis でセッションを探す',
+        body: 'Cookie のセッション ID をキーに Redis を引きます。期限（TTL）が切れていれば見つかりません。',
+        kv: [['見るもの', 'セッションの存在と期限']],
+      }));
+    } else {
+      // Cookie がなければ BFF は Redis を引かない（loadSession が先に返す）
+      steps.push(step({
+        from: 'bff', to: 'bff', kind: 'self', proto: 'BFF', tone: 'info', chip: 'Cookie なし → セッションなし',
+        summary: 'Cookie がないのでセッションなし',
+        title: 'BFF が Cookie を確かめる',
+        body: 'セッション Cookie がないので、Redis を引かずに「セッションなし」と判断します（Cookie が残っていても、Redis にセッションがなければ同じく「なし」）。',
+      }));
+    }
     if (by === 'nginx') {
       steps.push(step({
         from: 'bff', to: 'nginx', kind: 'res', tone: 'err', proto: 'HTTP', chip: '401',
@@ -153,7 +165,7 @@ export function apiCall(c) {
         from: 'nginx', to: 'browser', kind: 'res', tone: 'err', proto: 'HTTPS', chip: '401 rejected_by: nginx', reject: true,
         summary: 'nginx が 401 を返す（第1の関門）',
         title: 'nginx で止まる（第1の関門）',
-        body: 'nginx は `error_page 401 = @unauthenticated` で自分で 401 を返します。リクエスト本体は BFF にも API にも届いていません。',
+        body: 'nginx は `error_page 401 = @unauthenticated` で自分で 401 を返します。BFF に届いたのは「通してよいか」の確認（本文なしのサブリクエスト）だけで、元の `' + method + ' ' + path + '` は BFF にも API にも渡していません。',
         kv: responseKv(status, data),
       }));
       return steps;
@@ -178,6 +190,15 @@ export function apiCall(c) {
   }));
 
   // 6. BFF がセッションを読み直す
+  if (nginxSkipped && !c.hadSession) {
+    steps.push(step({
+      from: 'bff', to: 'bff', kind: 'self', tone: 'err', proto: 'BFF', chip: 'Cookie なし', reject: true,
+      summary: 'Cookie がないので 401',
+      title: 'BFF で止まる',
+      body: 'セッション Cookie がないので、Redis を引かずに 401 を返します。nginx の関門を外しても、BFF の層で止まります。',
+    }));
+    return steps.concat(returnPath('bff', status, data));
+  }
   steps.push(step({
     from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GET sess:…',
     summary: 'セッションとトークンを読む',
@@ -210,13 +231,20 @@ export function apiCall(c) {
     if (csrfFail) return steps.concat(returnPath('bff', status, data));
   }
 
-  // 8. リフレッシュ（呼び出しの前後でアクセストークンの期限が延びていたら）
-  if (c.refreshed) {
+  // 8. リフレッシュ（呼び出しの前後でアクセストークンの期限が延びていた／リフレッシュに失敗した）
+  if (c.refreshed || sessionExpired) {
     steps.push(step({
       from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'SET NX lock', tone: 'info',
       summary: '更新用のロックを取る',
       title: 'アクセストークンの期限が近い',
-      body: '期限が近いので BFF がリフレッシュします。BFF が何台あっても同時に更新しないよう、Redis にロックを取ります。ブラウザは何もしません。',
+      body: '期限が近いので BFF がリフレッシュします。BFF が何台あっても同時に更新しないよう、Redis にロックを取ります。ブラウザは何もしません。'
+        + ' すでに別のリクエストがロックを持っていれば、認証基盤は呼ばずに更新が終わるのを待ってセッションを読み直します。',
+    }));
+    steps.push(step({
+      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GET sess:…', tone: 'info',
+      summary: 'セッションを読み直す',
+      title: 'ロックを取ったあとで読み直す',
+      body: 'ロックを取る直前に別のリクエストが更新を終えていたかもしれないので、セッションを読み直します。まだ期限が近ければ更新に進みます。',
     }));
     steps.push(step({
       from: 'bff', to: 'idp', proto: 'HTTP', chip: 'refresh_token', tone: 'info',
@@ -225,6 +253,28 @@ export function apiCall(c) {
       body: 'サーバー間で認証基盤の `/token` を呼びます。リフレッシュトークンはブラウザを一度も通りません。',
       kv: [['grant_type', 'refresh_token']],
     }));
+    if (sessionExpired) {
+      steps.push(step({
+        from: 'idp', to: 'db', kind: 'round', proto: 'SQL', chip: '失効・期限切れ', tone: 'err',
+        summary: 'リフレッシュトークンを照合', title: 'リフレッシュトークンが使えない',
+        body: 'リフレッシュトークンが失効しているか期限切れなので、新しいトークンは発行されません。',
+      }));
+      steps.push(step({
+        from: 'idp', to: 'bff', kind: 'res', tone: 'err', proto: 'HTTP', chip: 'invalid_grant',
+        summary: '更新を拒否', title: '認証基盤が更新を断る', body: '',
+      }));
+      steps.push(step({
+        from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', tone: 'err', chip: 'DEL sess:…',
+        summary: 'セッションを消す', title: 'BFF がセッションを消す',
+        body: 'もうトークンを更新できないので、BFF はセッションを Redis から消します。',
+      }));
+      steps.push(step({
+        from: 'bff', to: 'bff', kind: 'self', tone: 'err', proto: 'BFF', chip: 'セッション切れ → 401', reject: true,
+        summary: 'BFF が 401（session expired）', title: 'BFF で止まる（ログインし直し）',
+        body: 'BFF は 401 を返し、`__Host-sid` Cookie も削除します。API には届きません。続けるにはログインし直しが必要です。',
+      }));
+      return steps.concat(returnPath('bff', status, data));
+    }
     steps.push(step({
       from: 'idp', to: 'db', kind: 'round', proto: 'SQL', chip: '回転', tone: 'info',
       summary: 'リフレッシュトークンを回転',
@@ -241,7 +291,12 @@ export function apiCall(c) {
       from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'SET XX', tone: 'info',
       summary: '存在するセッションだけ更新',
       title: 'セッションを更新する',
-      body: '`SET XX` で「まだ存在するセッションだけ」を更新します。更新中にログアウトされていたら、消えたセッションを復活させません。',
+      body: '`SET XX` で「まだ存在するセッションだけ」を更新します。更新中にログアウトされていたら、消えたセッションを復活させません（そのときは新しいリフレッシュトークンも失効させます）。',
+    }));
+    steps.push(step({
+      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'ロックを外す', tone: 'info',
+      summary: '自分のロックだけ外す', title: 'ロックを外す',
+      body: 'ロックの値が自分のものと一致するときだけ消します（期限切れのあとで別のリクエストが取ったロックは消さない）。',
     }));
   }
 
@@ -249,7 +304,7 @@ export function apiCall(c) {
     steps.push(step({ from: 'bff', to: 'api', proto: 'HTTP', tone: 'err', chip: '届かない', summary: 'API に届かない', title: 'API に届かない', body: 'BFF から API へ接続できませんでした。', reject: true }));
     return steps.concat(returnPath('bff', status, data));
   }
-  if (by === 'bff') { // その他の BFF での拒否（期限切れでリフレッシュに失敗した など）
+  if (by === 'bff') { // その他の BFF でのエラー（Redis のエラー・リフレッシュ待ちの時間切れなど。多くは 500）
     steps.push(step({
       from: 'bff', to: 'bff', kind: 'self', tone: 'err', proto: 'BFF', chip: data.error || String(status), reject: true,
       summary: 'BFF が拒否', title: 'BFF で止まる', body: `BFF が ${status} を返しました（${data.error || '理由不明'}）。`,
@@ -263,7 +318,7 @@ export function apiCall(c) {
     summary: 'JWT を付けて API へ',
     title: 'BFF が Cookie を JWT に付け替える',
     body: 'API には Cookie を渡さず、Redis から取り出したアクセストークン（JWT）を `Authorization` ヘッダに入れて送ります。トークンが通るのは Docker の内部ネットワークの中だけです。',
-    kv: [['付けるもの', 'Authorization: Bearer <JWT>'], ['外すもの', 'Cookie'], ['ネットワーク', 'backend（internal）']],
+    kv: [['付けるもの', 'Authorization: Bearer <JWT>'], ['外すもの', 'Cookie・X-CSRF-Token・ブラウザが付けた Authorization'], ['ネットワーク', 'backend（internal）']],
   }));
 
   // 10. API の検証
@@ -308,7 +363,7 @@ export function login(c = {}) {
       from: 'bff', to: 'nginx', kind: 'res', tone: 'info', proto: 'HTTP', chip: '302 + code_challenge',
       summary: '認証基盤へのリダイレクト', title: '認証基盤へ転送させる',
       body: 'ブラウザには verifier のハッシュ（`code_challenge`, S256）と `state`・`nonce` だけを付けた URL を返します。',
-      kv: [['Location', 'https://auth.localhost/authorize?…'], ['付けるもの', 'code_challenge（S256）・state・nonce']],
+      kv: [['Location', 'https://auth.localhost:8443/authorize?…'], ['付けるもの', 'code_challenge（S256）・state・nonce'], ['Set-Cookie', '__Host-bff_login（state をこのブラウザに結びつける）']],
     }),
     step({
       from: 'nginx', to: 'browser', kind: 'res', tone: 'info', proto: 'HTTPS', chip: '302 → auth.localhost',
@@ -316,15 +371,34 @@ export function login(c = {}) {
       body: 'ここから先はアプリ（app.localhost）ではなく認証基盤（auth.localhost）の画面です。アプリはパスワードを一度も見ません。',
     }),
     step({
-      from: 'browser', to: 'nginx', proto: 'HTTPS', chip: 'ユーザー名・パスワード',
-      summary: '認証画面でパスワードを送る', title: '認証基盤の画面でログインする',
-      body: 'ユーザー名とパスワードを POST します。認証基盤の SSO Cookie が残っていれば、この画面は省略されます。',
-      kv: [['宛先', 'https://auth.localhost/login'], ['送る先', '認証基盤だけ（BFF・API には届かない）']],
+      from: 'browser', to: 'nginx', proto: 'HTTPS', chip: 'GET /authorize',
+      summary: '認証基盤の画面を開く', title: '認証基盤の画面を開く',
+      body: 'リダイレクトに従って `/authorize` を開きます。認証基盤の SSO Cookie（`__Host-auth_sso`）が残っていれば、パスワード画面を出さずにすぐ認可コード付きで戻します。',
     }),
     step({
-      from: 'nginx', to: 'idp', proto: 'HTTP', chip: '/authorize・/login',
+      from: 'nginx', to: 'idp', proto: 'HTTP', chip: 'GET /authorize',
       summary: '認証基盤へ転送', title: 'nginx が Host で振り分ける',
       body: '`server_name auth.localhost` のブロックが認証基盤へ転送します。同じ nginx でも Host 名で行き先が変わります。',
+    }),
+    step({
+      from: 'idp', to: 'nginx', kind: 'res', tone: 'info', proto: 'HTTP', chip: 'ログイン画面 + CSRF Cookie',
+      summary: 'ログイン画面を返す', title: 'ログイン画面を返す',
+      body: 'フォームと一緒に CSRF 用の Cookie（`__Host-auth_csrf`）を渡し、POST のときに照合します。',
+    }),
+    step({
+      from: 'nginx', to: 'browser', kind: 'res', tone: 'info', proto: 'HTTPS', chip: 'ログイン画面',
+      summary: 'ログイン画面が出る', title: 'ログイン画面が出る', body: 'ここは認証基盤（auth.localhost）の画面です。',
+    }),
+    step({
+      from: 'browser', to: 'nginx', proto: 'HTTPS', chip: 'ユーザー名・パスワード',
+      summary: '認証画面でパスワードを送る', title: '認証基盤の画面でログインする',
+      body: 'ユーザー名とパスワードを POST します。送る先は認証基盤だけで、BFF・API には届きません。',
+      kv: [['宛先', 'https://auth.localhost:8443/login'], ['一緒に送るもの', 'CSRF 用の Cookie と値']],
+    }),
+    step({
+      from: 'nginx', to: 'idp', proto: 'HTTP', chip: 'POST /login',
+      summary: '認証基盤へ転送', title: 'nginx が認証基盤へ転送する',
+      body: 'ログインの POST には nginx のレート制限があり、連打すると 429 で止めます（パスワードの総当たり対策）。',
     }),
     step({
       from: 'idp', to: 'db', kind: 'round', proto: 'SQL', chip: 'ハッシュ照合・コード保存',
@@ -335,7 +409,7 @@ export function login(c = {}) {
       from: 'idp', to: 'nginx', kind: 'res', tone: 'info', proto: 'HTTP', chip: '302 ?code&state',
       summary: 'コールバックへリダイレクト', title: '認可コードを持たせて戻す',
       body: 'SSO Cookie（`__Host-auth_sso`）を付け、登録済みの `redirect_uri` に認可コードと `state` を付けて戻します。登録されていない戻り先には転送しません。',
-      kv: [['Location', 'https://app.localhost/bff/callback?code=…&state=…']],
+      kv: [['Location', 'https://app.localhost:8443/bff/callback?code=…&state=…&iss=…'], ['iss', 'どの認証基盤からの応答か（取り違え対策）']],
     }),
     step({
       from: 'nginx', to: 'browser', kind: 'res', tone: 'info', proto: 'HTTPS', chip: '302 → /bff/callback',
@@ -354,7 +428,7 @@ export function login(c = {}) {
     step({
       from: 'bff', to: 'bff', kind: 'self', tone: 'ok', proto: 'BFF', chip: 'state を照合',
       summary: 'state を照合', title: 'BFF が state を確かめる',
-      body: '自分が始めたログインの戻りかを `state` で確かめます。合わなければ 400 で止めます（ログイン CSRF の対策）。',
+      body: 'クエリの `state` と、ログイン開始時にこのブラウザへ付けた `__Host-bff_login` Cookie の値を比べます。合わなければ 400 で止めます（ログイン CSRF の対策）。',
     }),
     step({
       from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GETDEL',
@@ -370,7 +444,7 @@ export function login(c = {}) {
     step({
       from: 'idp', to: 'db', kind: 'round', proto: 'SQL', chip: 'コードを一度だけ消費',
       summary: '認可コードを消費', title: '認証基盤がコードを検証する',
-      body: 'コードは一回だけ使えます。`redirect_uri` と PKCE（`SHA256(verifier) == challenge`）も確かめます。',
+      body: 'コードは一回だけ使えます。`redirect_uri` と PKCE（`SHA256(verifier) == challenge`）も確かめます。発行するリフレッシュトークンは、ハッシュにして新しい系統として保存します。',
     }),
     step({
       from: 'idp', to: 'bff', kind: 'res', tone: 'ok', proto: 'HTTP', chip: 'access・id・refresh',
@@ -380,12 +454,13 @@ export function login(c = {}) {
     step({
       from: 'bff', to: 'bff', kind: 'self', tone: 'ok', proto: 'BFF', chip: '署名・iss・aud・exp・nonce',
       summary: 'ID トークンを検証', title: 'BFF が ID トークンを検証する',
-      body: '署名・発行元・宛先・期限に加え、`nonce` がさっき作ったものと一致するかを確かめます。',
+      body: '署名・発行元・宛先・期限に加え、`nonce` がさっき作ったものと一致するかを確かめます。署名の鍵は、初回に認証基盤の JWKS を取得してキャッシュします。',
     }),
     step({
-      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'SET sess:新ID（TTL）',
+      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'SET sess:SHA256(新ID)',
       summary: 'セッションを作る', title: '新しいセッションを Redis に作る',
-      body: `${who} の情報とトークン・CSRF 値を、新しく作ったセッション ID で保存します。ログイン前の ID は使い回しません（セッション固定攻撃の対策）。`,
+      body: `${who} の情報とトークン・CSRF 値を、新しく作ったセッション ID で保存します。ログイン前の ID は使い回さず、古いセッションがあれば消します（セッション固定攻撃の対策）。Redis のキーは ID のハッシュなので、Redis の中身が漏れても Cookie には使えません。`,
+      kv: [['期限（TTL）', 'アイドル期限と絶対期限の短いほう']],
     }),
     step({
       from: 'bff', to: 'nginx', kind: 'res', tone: 'ok', proto: 'HTTP', chip: 'Set-Cookie: __Host-sid',
@@ -420,16 +495,20 @@ export function logout(c) {
       from: 'nginx', to: 'bff', proto: 'HTTP', chip: 'POST /bff/logout',
       summary: 'BFF へ転送', title: 'nginx が BFF へ転送する', body: '`/bff/` には `auth_request` はありません。確認は BFF が行います。',
     }),
-    step({
-      from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GET sess:…',
-      summary: 'セッションを照会', title: 'BFF がセッションを探す', body: '',
-    }),
   ];
   const by = data && data.rejected_by;
   if (status === 401) {
-    steps.push(step({ from: 'bff', to: 'bff', kind: 'self', tone: 'err', proto: 'BFF', chip: 'セッションなし', reject: true, summary: 'セッションなし', title: 'BFF で止まる', body: 'ログアウトするセッションがありません。' }));
+    steps.push(step({ from: 'bff', to: 'bff', kind: 'self', tone: 'err', proto: 'BFF', chip: 'セッションなし', reject: true, summary: 'セッションなし', title: 'BFF で止まる', body: 'Cookie がない、または Redis にセッションがないので、ログアウトするものがありません（401）。' }));
     return steps.concat(returnPath('bff', status, data));
   }
+  if (status >= 500) {
+    steps.push(step({ from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', tone: 'err', chip: 'エラー', reject: true, summary: 'Redis のエラー', title: 'ログアウトを成功扱いにしない', body: 'セッションの読み込みか削除で Redis のエラーが起きると 500 を返し、ログアウト成功も Cookie の削除も返しません。' }));
+    return steps.concat(returnPath('bff', status, data));
+  }
+  steps.push(step({
+    from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GET sess:…',
+    summary: 'セッションを照会', title: 'BFF がセッションを探す', body: 'Cookie のセッション ID で Redis を引き、CSRF の照合に使う値を取り出します。',
+  }));
   const csrfFail = status === 403 && by === 'bff';
   steps.push(step({
     from: 'bff', to: 'bff', kind: 'self', tone: csrfFail ? 'err' : 'ok', proto: 'BFF', reject: csrfFail,
@@ -437,10 +516,6 @@ export function logout(c) {
     summary: 'Origin と CSRF を確認', title: csrfFail ? 'BFF で止まる（CSRF）' : 'BFF が CSRF を確かめる', body: '',
   }));
   if (csrfFail) return steps.concat(returnPath('bff', status, data));
-  if (status !== 200) {
-    steps.push(step({ from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', tone: 'err', chip: 'エラー', reject: true, summary: 'セッションを消せない', title: 'ログアウトを成功扱いにしない', body: 'Redis の削除に失敗したときは 500 を返し、Cookie の削除も返しません。' }));
-    return steps.concat(returnPath('bff', status, data));
-  }
   steps.push(
     step({
       from: 'bff', to: 'redis', kind: 'round', proto: 'Redis', chip: 'GETDEL sess:…',
@@ -450,7 +525,7 @@ export function logout(c) {
     step({
       from: 'bff', to: 'idp', proto: 'HTTP', chip: 'POST /revoke',
       summary: 'リフレッシュトークンを失効', title: 'リフレッシュトークンを失効させる',
-      body: 'BFF が持っていたリフレッシュトークンを認証基盤に失効させます。',
+      body: 'BFF が持っていたリフレッシュトークンを認証基盤に失効させます。失効の要求に失敗しても、ログに警告を残してログアウトは続けます。',
     }),
     step({
       from: 'idp', to: 'db', kind: 'round', proto: 'SQL', chip: '系統ごと失効',
