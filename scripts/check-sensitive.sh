@@ -12,10 +12,14 @@ cd "$root"
 if [ "$mode" = "--staged" ]; then
   files="$(git diff --cached --name-only --diff-filter=ACMR)"
   show() { git show ":$1"; }
+  fsize() { git cat-file -s ":$1"; }
 else
   files="$(git ls-files --cached --others --exclude-standard)"
   show() { cat "$1"; }
+  fsize() { wc -c < "$1" | tr -d ' '; }
 fi
+# 先頭 64KB に NUL があればバイナリ。grep -q が先に終わっても誤判定しないよう、ここだけ pipefail を外す
+is_text() { ( set +o pipefail; show "$1" 2>/dev/null | head -c 65536 | LC_ALL=C grep -Iq . ); }
 
 fail=0
 report() { echo "  ✗ $1: $2" >&2; fail=1; }
@@ -30,14 +34,25 @@ while IFS= read -r f; do
       report "$f" "秘密を含むファイル名（.env.example 以外の .env・鍵・証明書）"; continue ;;
   esac
 
-  # 検査スクリプト自身とバイナリは中身を見ない
+  # 検査スクリプト自身は中身を見ない
   [ "$f" = "scripts/check-sensitive.sh" ] && continue
   if [ "$mode" != "--staged" ] && [ ! -f "$f" ]; then continue; fi
-  content="$(show "$f" 2>/dev/null || true)"
-  # バイナリ（または空）は飛ばす。grep -I はバイナリを「一致なし」として扱う
-  if ! printf '%s' "$content" | grep -Iq .; then continue; fi
+  size="$(fsize "$f")"
+  [ "$size" -eq 0 ] && continue
 
-  # 2) 中身の形
+  # 2) バイナリは画像だけ許す。手元でビルドした実行ファイルには PC の絶対パス（ユーザー名）が埋め込まれる
+  if ! is_text "$f"; then
+    case "$base" in
+      *.png|*.gif|*.jpg|*.jpeg|*.webp|*.ico)
+        [ "$size" -gt 3145728 ] && report "$f" "画像が大きすぎる（3MB 超）" ;;
+      *)
+        report "$f" "画像以外のバイナリ（ビルドした実行ファイルなど。ビルドはコンテナの中で行う）" ;;
+    esac
+    continue
+  fi
+  content="$(show "$f" 2>/dev/null || true)"
+
+  # 3) 中身の形
   printf '%s' "$content" | grep -nE -- '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----' >/dev/null \
     && report "$f" "秘密鍵"
   printf '%s' "$content" | grep -nE 'AKIA[0-9A-Z]{16}' >/dev/null \

@@ -7,3 +7,8 @@ nginx/certs/
 .e2e/
 .claude/settings.local.json
 .DS_Store
+
+# Go のビルド成果物。手元でビルドすると PC の絶対パスが埋め込まれるので載せない（ビルドはコンテナの中）
+/services/api/api
+/services/auth/auth
+/services/bff/bff
